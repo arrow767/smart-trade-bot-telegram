@@ -14,6 +14,8 @@ function readEnv(key: string, ...alts: string[]): string | undefined {
   return undefined;
 }
 
+async function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+
 export class BinanceFutures {
   private fapi: ccxt.binanceusdm;
   private sapi?: ccxt.binance; // spot client (лениво)
@@ -30,6 +32,7 @@ export class BinanceFutures {
       secret: this.secret,
       enableRateLimit: opts?.enableRateLimit ?? true,
       options: { defaultType: "future" },
+      timeout: 20000, // устойчивее к сетевым пикам
     } as any);
   }
 
@@ -50,6 +53,7 @@ export class BinanceFutures {
         secret: this.secret,
         enableRateLimit: true,
         options: { defaultType: "spot" },
+        timeout: 20000,
       } as any);
     }
     return this.sapi!;
@@ -147,6 +151,20 @@ export class BinanceFutures {
   async fetchTicker(symbol: string) {
     // тикер публичный — ключи не нужны
     return this.fapi.fetchTicker(symbol);
+  }
+
+  // — безопасный тикер с ретраями
+  async fetchTickerSafe(symbol: string, tries = 3) {
+    let lastErr: any;
+    for (let i = 0; i < tries; i++) {
+      try {
+        return await this.fetchTicker(symbol);
+      } catch (e) {
+        lastErr = e;
+        await sleep(400 * (i + 1));
+      }
+    }
+    throw lastErr;
   }
 
   async fetchOpenOrders(symbol: string) {

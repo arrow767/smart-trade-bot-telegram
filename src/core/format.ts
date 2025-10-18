@@ -17,6 +17,21 @@ const g = (s: string) => paint(s, "green");
 const r = (s: string) => paint(s, "red");
 const dim = (s: string) => paint(s, "gray");
 
+// ===== Helpers: visible length & padding with ANSI =====
+const ANSI_REGEX = /\x1b\[[0-9;]*m/g;
+function stripAnsi(s: string) { return s.replace(ANSI_REGEX, ""); }
+function visLen(s: string) { return stripAnsi(String(s)).length; }
+function padVisEnd(s: string, width: number) {
+  const str = String(s);
+  const need = Math.max(0, width - visLen(str));
+  return str + " ".repeat(need);
+}
+function padVisStart(s: string, width: number) {
+  const str = String(s);
+  const need = Math.max(0, width - visLen(str));
+  return " ".repeat(need) + str;
+}
+
 function shortSymbol(s: string): string {
   return s
     .replace(/\/USDT:USDT$/i, "")
@@ -31,9 +46,13 @@ function sideTag(mode: UIMode, side: "long"|"short"): string {
 }
 
 function lineBox(lines: string[], title?: string): string {
-  const width = Math.max(...lines.map(l => l.length), (title?.length ?? 0) + 2, 28);
-  const top = "┌" + (title ? `─ ${title} ` : "─") + "─".repeat(Math.max(0, width - (title ? title.length + 2 : 1))) + "┐";
-  const body = lines.map(l => "│ " + l.padEnd(width, " ") + " │").join("\n");
+  const width = Math.max(
+    ...(lines.length ? lines.map(l => visLen(l)) : [0]),
+    (title ? visLen(title) + 2 : 0),
+    28
+  );
+  const top = "┌" + (title ? `─ ${title} ` : "─") + "─".repeat(Math.max(0, width - (title ? visLen(title) + 2 : 1))) + "┐";
+  const body = lines.map(l => "│ " + padVisEnd(l, width) + " │").join("\n");
   const bot = "└" + "─".repeat(width + 2) + "┘";
   return `${top}\n${body}\n${bot}`;
 }
@@ -97,71 +116,103 @@ export function formatDeposit(
   return mode === "console" ? lineBox(lines, "DEPOSIT (USDT)") : monoBlock(lines.join("\n"));
 }
 
-/**
- * Обновлённый компактный вывод позиций:
- * - Аккуратная таблица с заголовком: Sym | S | Qty | Avg | PnL
- * - Для Telegram — моноширинный блок, PnL с эмодзи цвета; для консоли — цвет ANSI
- * - ΣPnL и количество позиций — в заголовке таблицы
- */
+// ---------- Компактная таблица позиций для Telegram ----------
+function makeCompactPositionsTable(
+  rows: Array<{ symbol: string; side: "long"|"short"; pnl: number }>
+): string {
+  const data = rows.map(r => ({
+    sym: shortSymbol(r.symbol).toUpperCase(),
+    dir: r.side === "long" ? "L" : "S",
+    pnl: r.pnl,
+  }));
+
+  const symW = Math.max(6, ...data.map(d => d.sym.length));
+  const dirW = 3;
+  const pnlStrs = data.map(d => `${d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(2)}$`);
+  const pnlW = Math.max(6, ...pnlStrs.map(s => s.length));
+
+  const header = [
+    "TICKER".padEnd(symW),
+    "DIR".padEnd(dirW),
+    "PnL".padStart(pnlW),
+  ].join("  ");
+
+  const sep = "-".repeat(header.length);
+
+  const lines = data.map((d) => {
+    const tag = d.dir === "L" ? "🟢L" : "🔴S";
+    const pnlS = `${d.pnl >= 0 ? "+" : ""}${d.pnl.toFixed(2)}$`;
+    return [
+      d.sym.padEnd(symW),
+      tag.padEnd(dirW),
+      pnlS.padStart(pnlW),
+    ].join("  ");
+  });
+
+  return [header, sep, ...lines].join("\n");
+}
+
 export function formatPositions(
   mode: UIMode,
   list: Array<{ symbol: string; side: "long"|"short"; qty: number; avg: number; pnl: number }>
 ) {
-  if (!list.length) {
-    return mode === "console"
-      ? lineBox(["Нет открытых позиций."], "POSITIONS")
-      : monoBlock("Нет открытых позиций.");
+  // Telegram: компактный вид (тикер, направление, PnL)
+  if (mode === "telegram") {
+    if (!list.length) return monoBlock("Нет открытых позиций.");
+    const compact = makeCompactPositionsTable(
+      [...list]
+        .sort((a, b) => (b.pnl || 0) - (a.pnl || 0))
+        .map(p => ({ symbol: p.symbol, side: p.side, pnl: Number(p.pnl) || 0 }))
+    );
+    return monoBlock(compact);
   }
 
-  // сортируем по PnL убыв.
+  // Console: подробный и РОВНЫЙ
+  if (!list.length) {
+    return lineBox(["Нет открытых позиций."], "POSITIONS");
+  }
+
   const items = [...list].sort((a, b) => (b.pnl || 0) - (a.pnl || 0));
   const totalPnl = items.reduce((s, p) => s + (Number(p.pnl) || 0), 0);
+  const totalPnlRaw = `${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}$`;
+  const totalPnlColored = totalPnl > 0 ? g(totalPnlRaw) : totalPnl < 0 ? r(totalPnlRaw) : totalPnlRaw;
 
-  // колонки
-  const header = ["Sym", "S", "Qty", "Avg", "PnL"];
-  const rows = items.map(p => {
-    const sym = shortSymbol(p.symbol).slice(0, 10); // компакт
-    const side = sideTag(mode, p.side);
-    const qty = fix3(p.qty);
-    const avg = fix3(p.avg);
-    const pnl = fmtPnl(mode, Number(p.pnl) || 0);
-    return [sym, side, qty, avg, pnl];
+  // Колонки (сырье для ширин)
+  const symCol = items.map(p => shortSymbol(p.symbol));
+  const sideColRaw = items.map(p => (p.side === "long" ? "L" : "S")); // для ширины — без эмодзи
+  const qtyCol  = items.map(p => fix3(p.qty));
+  const avgCol  = items.map(p => fix3(p.avg));
+  const pnlRaw  = items.map(p => `${(Number(p.pnl)||0) >= 0 ? "+" : ""}${(Number(p.pnl)||0).toFixed(2)}$`);
+
+  const symW  = Math.max(6, ...symCol.map(visLen));
+  const sideW = 1; // L/S
+  const qtyW  = Math.max(8, ...qtyCol.map(visLen));
+  const avgW  = Math.max(8, ...avgCol.map(visLen));
+  const pnlW  = Math.max(8, ...pnlRaw.map(s => s.length)); // ширина по RAW без ANSI
+
+  const rows = items.map((p, idx) => {
+    const sym = padVisEnd(symCol[idx], symW);
+    const tagRaw = sideColRaw[idx];                       // "L" | "S"
+    const tag = tagRaw === "L" ? g("L") : r("S");         // цвет только после паддинга
+    const tagPadded = padVisEnd(tag, sideW);
+
+    const q   = padVisEnd(qtyCol[idx], qtyW);
+    const avg = padVisEnd(avgCol[idx], avgW);
+
+    const pnlSRaw = pnlRaw[idx];
+    const pnlPadded = padVisStart(pnlSRaw, pnlW);
+    const pnlColored = (Number(p.pnl)||0) > 0 ? g(pnlPadded) : (Number(p.pnl)||0) < 0 ? r(pnlPadded) : pnlPadded;
+
+    // Собираем ровную строку; всё — строки, никаких объектов
+    return `${sym} ${tagPadded}  q=${q}  avg=${avg}  PnL=${pnlColored}`;
   });
 
-  // ширины столбцов (кроме PnL — он цветной/эмодзи, не выравниваем жёстко)
-  const colWidths = [0, 0, 0, 0].map((_, i) =>
-    Math.max(header[i].length, ...rows.map(r => r[i].length))
-  );
-
-  const pad = (s: string, w: number) => s.padEnd(w, " ");
-
-  const lines: string[] = [];
-  // шапка с итого
-  lines.push(`count: ${items.length}   ΣPnL: ${fmtPnl(mode, totalPnl)}`);
-  // заголовок таблицы
-  const headLine =
-    pad(header[0], colWidths[0]) + "  " +
-    pad(header[1], colWidths[1]) + "  " +
-    pad(header[2], colWidths[2]) + "  " +
-    pad(header[3], colWidths[3]) + "  " +
-    header[4];
-  lines.push(headLine);
-  lines.push("-".repeat(Math.max(headLine.length, 28)));
-
-  // строки таблицы
-  for (const r of rows) {
-    const line =
-      pad(r[0], colWidths[0]) + "  " +
-      pad(r[1], colWidths[1]) + "  " +
-      pad(r[2], colWidths[2]) + "  " +
-      pad(r[3], colWidths[3]) + "  " +
-      r[4]; // PnL как есть (цвет/эмодзи уже внутри fmtPnl)
-    lines.push(line);
-  }
-
-  return mode === "console"
-    ? lineBox(lines, "POSITIONS")
-    : monoBlock(lines.join("\n"));
+  const head = [
+    `count: ${items.length}`,
+    `ΣPnL: ${totalPnlColored}`,
+  ];
+  const lines = [...head, ...rows];
+  return lineBox(lines, "POSITIONS");
 }
 
 export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string; symbol:string; label:string; agoSec:number; error?:string }>) {
@@ -171,12 +222,13 @@ export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string
 }
 
 export function banner(mode: UIMode, main: string, sub?: string) {
+  const mainLine = b(c(main));
   return mode === "console"
-    ? lineBox([b(c(main)), ...(sub ? [dim(sub)] : [])], "SMART TRADE")
+    ? lineBox([mainLine, ...(sub ? [dim(sub)] : [])], "SMART TRADE")
     : monoBlock(`SMART TRADE\n${main}${sub?`\n${sub}`:""}`);
 }
 
-// ------ НОВОЕ: форматтеры пресетов ------
+// ------ Пресеты ------
 export function formatPreset(mode: UIMode, p: { name: string; risk: number; tp: number[]; ratio: number[]; isDefault?: boolean }) {
   const lines = [
     `name: ${p.name}${p.isDefault ? " (default)" : ""}`,

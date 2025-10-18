@@ -377,55 +377,71 @@ async function cancelBracketOnly(ex: BinanceFutures, symbolCcxt: string, keepIds
 }
 
 // ✅ Частичное/полное закрытие: если reduce-only MARKET не проходит из-за занятой квоты TP,
-// снимаем минимально нужное количество reduce-only лимиток, затем выполняем MARKET.
+// снимаем минимально нужное количество reduce-only лимиток, затем выполняем MARKET, с ретраями.
 async function closePositionPercent(
   ex: BinanceFutures,
   symbolCcxt: string,
   percent: number
 ): Promise<{ closed: number; sideExit: "buy" | "sell"; fullyClosed: boolean }> {
-  // получаем SIGNED размер
-  const amtSigned = await ex.fetchPositionSize(symbolCcxt);
-  const sideExit: "buy" | "sell" = amtSigned > 0 ? "sell" : "buy";
-  const size = Math.abs(amtSigned);
-  if (size <= 0) return { closed: 0, sideExit, fullyClosed: true };
+  // получаем SIGNED размер (для стороны выхода)
+  const amtSigned0 = await ex.fetchPositionSize(symbolCcxt);
+  const sideExit: "buy" | "sell" = amtSigned0 > 0 ? "sell" : "buy";
+  const size0 = Math.abs(amtSigned0);
+  if (size0 <= 0) return { closed: 0, sideExit, fullyClosed: true };
 
   const f = ex.getSymbolFilters(symbolCcxt);
-  const targetRaw = percent >= 100 ? size : (size * percent) / 100;
+  const targetRaw = percent >= 100 ? size0 : (size0 * percent) / 100;
   const steps = Math.floor(targetRaw / f.stepSize + 1e-12);
   const target = Math.max(f.minQty, Number(ex.amountToPrecision(symbolCcxt, steps * f.stepSize)));
   if (!(target > 0)) return { closed: 0, sideExit, fullyClosed: false };
 
-  // Открытые reduce-only лимитки (TP) в сторону выхода
-  const open = await ex.fetchOpenOrders(symbolCcxt);
-  type OpenRO = { id: string; amount: number; side: string; type: string };
-  const roList: OpenRO[] = [];
-  for (const o of open) {
-    const reduceOnly =
-      (o.info?.reduceOnly === true || o.info?.reduceOnly === "true" || (o as any).reduceOnly === true) &&
-      String(o.type || "").toUpperCase().includes("LIMIT");
-    if (!reduceOnly) continue;
-    if (String(o.side || "").toLowerCase() !== sideExit) continue;
-    const amt = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
-    if (amt > 0 && o.id) roList.push({ id: o.id, amount: amt, side: String(o.side), type: String(o.type) });
-  }
-
-  const roTotal = roList.reduce((s, x) => s + x.amount, 0);
-  const freeCapacity = Math.max(0, size - roTotal);
-
-  if (target > freeCapacity + 1e-12) {
-    let toCancel = target - freeCapacity;
-    roList.sort((a, b) => a.amount - b.amount); // снимем самых маленьких первыми
-    for (const o of roList) {
-      if (toCancel <= 0) break;
-      try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
-      toCancel -= o.amount;
+  const tryOnce = async (): Promise<boolean> => {
+    // Открытые reduce-only лимитки (TP) в сторону выхода
+    const open = await ex.fetchOpenOrders(symbolCcxt);
+    type OpenRO = { id: string; amount: number; side: string; type: string };
+    const roList: OpenRO[] = [];
+    for (const o of open) {
+      const reduceOnly =
+        (o.info?.reduceOnly === true || o.info?.reduceOnly === "true" || (o as any).reduceOnly === true) &&
+        String(o.type || "").toUpperCase().includes("LIMIT");
+      if (!reduceOnly) continue;
+      if (String(o.side || "").toLowerCase() !== sideExit) continue;
+      const amt = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
+      if (amt > 0 && o.id) roList.push({ id: o.id, amount: amt, side: String(o.side), type: String(o.type) });
     }
+
+    // актуальный размер позы перед закрытием
+    const amtSigned = await ex.fetchPositionSize(symbolCcxt);
+    const currentSize = Math.abs(amtSigned);
+    const roTotal = roList.reduce((s, x) => s + x.amount, 0);
+    const freeCapacity = Math.max(0, currentSize - roTotal);
+
+    // если квоты не хватает — снимем минимально нужные TP
+    if (target > freeCapacity + 1e-12) {
+      let toCancel = target - freeCapacity;
+      roList.sort((a, b) => a.amount - b.amount);
+      for (const o of roList) {
+        if (toCancel <= 0) break;
+        try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
+        toCancel -= o.amount;
+      }
+    }
+
+    try {
+      await ex.createReduceOnlyMarket(symbolCcxt, sideExit as any, target);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  for (let i = 0; i < 3; i++) { // до трёх попыток в гонке
+    const ok = await tryOnce();
+    if (ok) break;
+    await new Promise(r => setTimeout(r, 250 + i * 250));
+    if (i === 2) throw new Error("ReduceOnly Order is rejected.");
   }
 
-  // MARKET reduce-only
-  await ex.createReduceOnlyMarket(symbolCcxt, sideExit as any, target);
-
-  // Проверка остатка
   await new Promise((r) => setTimeout(r, 600));
   const left = Math.abs(await ex.fetchPositionSize(symbolCcxt));
   const fullyClosed = left < f.minQty * 0.5;
@@ -649,24 +665,28 @@ export async function runCommand(
   if (parsed.kind === "close") {
     const { symbol, percent } = parsed;
     const { symbolCcxt } = normalizeTickerToUsdt(symbol);
-    const res = await closePositionPercent(ex, symbolCcxt, percent);
-    if (res.closed <= 0) {
-      info(mode === "console" ? `Нет позиции по ${symbolCcxt}.` : `<b>Нет позиции по ${symbolCcxt}</b>`);
-      return;
-    }
-    if (res.fullyClosed) {
-      await ex.cancelAllOrders(symbolCcxt).catch(() => {});
-      info(
-        mode === "console"
-          ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}). Все лимитки сняты.`
-          : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>\nЛимитки сняты.`
-      );
-    } else {
-      info(
-        mode === "console"
-          ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}).`
-          : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>`
-      );
+    try {
+      const res = await closePositionPercent(ex, symbolCcxt, percent);
+      if (res.closed <= 0) {
+        info(mode === "console" ? `Нет позиции по ${symbolCcxt}.` : `<b>Нет позиции по ${symbolCcxt}</b>`);
+        return;
+      }
+      if (res.fullyClosed) {
+        await ex.cancelAllOrders(symbolCcxt).catch(() => {});
+        info(
+          mode === "console"
+            ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}). Все лимитки сняты.`
+            : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>\nЛимитки сняты.`
+        );
+      } else {
+        info(
+          mode === "console"
+            ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}).`
+            : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>`
+        );
+      }
+    } catch (e:any) {
+      info(`❌ [ERROR] ${e?.message || e}`);
     }
     return;
   }
@@ -696,8 +716,8 @@ export async function runCommand(
       return;
     }
 
-    const tick = await ex.fetchTicker(symbolCcxt);
-    const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
+    const tick = await ex.fetchTickerSafe(symbolCcxt);
+    const mark = Number(tick.last ?? (tick as any).mark ?? (tick as any).info?.markPrice);
 
     const open = await ex.fetchOpenOrders(symbolCcxt);
     const openIds = new Set(open.filter((o) => o.id).map((o) => o.id as string));
@@ -776,8 +796,8 @@ export async function runCommand(
   ex.loadMarkets && (await ex.loadMarkets().catch(() => {}));
   ex.market(symbolCcxt);
 
-  const t0 = await ex.fetchTicker(symbolCcxt);
-  let markPrice = Number(t0.last ?? t0.mark ?? t0.info?.markPrice);
+  const t0 = await ex.fetchTickerSafe(symbolCcxt);
+  let markPrice = Number(t0.last ?? (t0 as any).mark ?? (t0 as any).info?.markPrice);
   if (!markPrice || !(markPrice > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
 
   const totalUsd = legs.reduce((a, l) => a + l.usd, 0);
@@ -872,8 +892,8 @@ export async function runCommand(
           return;
         }
 
-        const tick = await ex.fetchTicker(symbolCcxt);
-        const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
+        const tick = await ex.fetchTickerSafe(symbolCcxt);
+        const mark = Number(tick.last ?? (tick as any).mark ?? (tick as any).info?.markPrice);
 
         const positions = await ex.fetchAllOpenPositions();
         const my = positions.find((p) => p.symbol === symbolCcxt);
