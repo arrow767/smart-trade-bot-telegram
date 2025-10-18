@@ -1,0 +1,19 @@
+{
+  "default": "4h",
+  "presets": {
+    "4h": {
+      "config_name": "4h",
+      "trade_risk": 0.2,
+      "take_profit": [
+        3,
+        5,
+        7
+      ],
+      "take_profit_ratio": [
+        35,
+        30,
+        35
+      ]
+    }
+  }
+}
