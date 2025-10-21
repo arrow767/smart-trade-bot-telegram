@@ -8,7 +8,7 @@ import {
   TradingPreset,
 } from "../config/trading_config";
 import { normalizeTickerToUsdt } from "./SymbolResolver";
-import { BinanceFutures } from "../exch/BinanceFutures";
+import { BinanceFutures, WorkingType } from "../exch/BinanceFutures";
 import { planTargets } from "./Planner";
 import { splitQtyToStep, mergeDustToPrev } from "../utils/math";
 import {
@@ -47,7 +47,7 @@ export type ParsedCmd =
   // управление пресетами:
   | { kind: "preset_list" }
   | { kind: "preset_show"; name: string }
-  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean }
+  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean; working?: string; slTicks?: number }
   | { kind: "preset_delete"; name: string };
 
 export type TaskStatus =
@@ -75,6 +75,11 @@ export type Task = {
 
 export const DEFAULT_PRESET = "4h";
 const NOTIONAL_BIAS: "nearest" | "down" | "up" = "nearest";
+
+// ===== Новые дефолты (env) =====
+const ENV_WORKING = String(process.env.WORKING_TYPE || "contract").toLowerCase() === "mark" ? "MARK_PRICE" : "CONTRACT_PRICE";
+const ENV_STOP_TICKS = Math.max(0, Number(process.env.STOP_OFFSET_TICKS || "1")) || 1;
+const POLL_INTERVAL_MS = Math.max(200, Number(process.env.POLL_INTERVAL_MS || "400")) || 400;
 
 // ========== Книга задач ==========
 
@@ -186,7 +191,9 @@ export function parseLine(line: string): ParsedCmd | null {
       const tp = parseNumsCSV(kv.get("tp") || kv.get("take_profit"));
       const ratio = parseNumsCSV(kv.get("ratio") || kv.get("take_profit_ratio"));
       const makeDefault = kv.get("default") === "1" || kv.get("default") === "true";
-      return { kind: "preset_set", name, risk, tp, ratio, makeDefault };
+      const working = kv.get("working");        // contract|mark|last
+      const slTicks = kv.has("sl_ticks") ? Number(kv.get("sl_ticks")) : undefined;
+      return { kind: "preset_set", name, risk, tp, ratio, makeDefault, working, slTicks };
     }
 
     if (sub.startsWith("default")) {
@@ -338,16 +345,30 @@ function computeQtyForUsdSmart(
   };
 }
 
-function wouldStopImmediatelyTrigger(side: "long" | "short", stopPrice: number, mark: number) {
-  return side === "long" ? stopPrice <= mark : stopPrice >= mark;
+// рабочая цена для сравнения (в зависимости от workingType)
+function getRefPrice(tick: any, working: WorkingType): number {
+  const last = Number(tick.last ?? tick.info?.lastPrice ?? 0);
+  const mark = Number(tick.mark ?? tick.info?.markPrice ?? 0);
+  return working === "MARK_PRICE" ? mark || last : last || mark;
 }
 
-function adjustStopForMark(side: "long" | "short", desired: number, mark: number, tick: number) {
+function wouldStopImmediatelyTrigger(side: "long" | "short", stopPrice: number, ref: number) {
+  return side === "long" ? stopPrice <= ref : stopPrice >= ref;
+}
+
+function adjustStopForRef(
+  side: "long" | "short",
+  desired: number,
+  ref: number,
+  tick: number,
+  ticksOffset: number
+) {
+  const off = Math.max(0, Math.floor(ticksOffset)) * (tick || 0);
   if (side === "long") {
-    const safe = mark - 2 * tick;
+    const safe = ref - off;
     return Math.min(desired, safe);
   } else {
-    const safe = mark + 2 * tick;
+    const safe = ref + off;
     return Math.max(desired, safe);
   }
 }
@@ -377,71 +398,55 @@ async function cancelBracketOnly(ex: BinanceFutures, symbolCcxt: string, keepIds
 }
 
 // ✅ Частичное/полное закрытие: если reduce-only MARKET не проходит из-за занятой квоты TP,
-// снимаем минимально нужное количество reduce-only лимиток, затем выполняем MARKET, с ретраями.
+// снимаем минимально нужное количество reduce-only лимиток, затем выполняем MARKET.
 async function closePositionPercent(
   ex: BinanceFutures,
   symbolCcxt: string,
   percent: number
 ): Promise<{ closed: number; sideExit: "buy" | "sell"; fullyClosed: boolean }> {
-  // получаем SIGNED размер (для стороны выхода)
-  const amtSigned0 = await ex.fetchPositionSize(symbolCcxt);
-  const sideExit: "buy" | "sell" = amtSigned0 > 0 ? "sell" : "buy";
-  const size0 = Math.abs(amtSigned0);
-  if (size0 <= 0) return { closed: 0, sideExit, fullyClosed: true };
+  // получаем SIGNED размер
+  const amtSigned = await ex.fetchPositionSize(symbolCcxt);
+  const sideExit: "buy" | "sell" = amtSigned > 0 ? "sell" : "buy";
+  const size = Math.abs(amtSigned);
+  if (size <= 0) return { closed: 0, sideExit, fullyClosed: true };
 
   const f = ex.getSymbolFilters(symbolCcxt);
-  const targetRaw = percent >= 100 ? size0 : (size0 * percent) / 100;
+  const targetRaw = percent >= 100 ? size : (size * percent) / 100;
   const steps = Math.floor(targetRaw / f.stepSize + 1e-12);
   const target = Math.max(f.minQty, Number(ex.amountToPrecision(symbolCcxt, steps * f.stepSize)));
   if (!(target > 0)) return { closed: 0, sideExit, fullyClosed: false };
 
-  const tryOnce = async (): Promise<boolean> => {
-    // Открытые reduce-only лимитки (TP) в сторону выхода
-    const open = await ex.fetchOpenOrders(symbolCcxt);
-    type OpenRO = { id: string; amount: number; side: string; type: string };
-    const roList: OpenRO[] = [];
-    for (const o of open) {
-      const reduceOnly =
-        (o.info?.reduceOnly === true || o.info?.reduceOnly === "true" || (o as any).reduceOnly === true) &&
-        String(o.type || "").toUpperCase().includes("LIMIT");
-      if (!reduceOnly) continue;
-      if (String(o.side || "").toLowerCase() !== sideExit) continue;
-      const amt = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
-      if (amt > 0 && o.id) roList.push({ id: o.id, amount: amt, side: String(o.side), type: String(o.type) });
-    }
-
-    // актуальный размер позы перед закрытием
-    const amtSigned = await ex.fetchPositionSize(symbolCcxt);
-    const currentSize = Math.abs(amtSigned);
-    const roTotal = roList.reduce((s, x) => s + x.amount, 0);
-    const freeCapacity = Math.max(0, currentSize - roTotal);
-
-    // если квоты не хватает — снимем минимально нужные TP
-    if (target > freeCapacity + 1e-12) {
-      let toCancel = target - freeCapacity;
-      roList.sort((a, b) => a.amount - b.amount);
-      for (const o of roList) {
-        if (toCancel <= 0) break;
-        try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
-        toCancel -= o.amount;
-      }
-    }
-
-    try {
-      await ex.createReduceOnlyMarket(symbolCcxt, sideExit as any, target);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  for (let i = 0; i < 3; i++) { // до трёх попыток в гонке
-    const ok = await tryOnce();
-    if (ok) break;
-    await new Promise(r => setTimeout(r, 250 + i * 250));
-    if (i === 2) throw new Error("ReduceOnly Order is rejected.");
+  // Открытые reduce-only лимитки (TP) в сторону выхода
+  const open = await ex.fetchOpenOrders(symbolCcxt);
+  type OpenRO = { id: string; amount: number; side: string; type: string };
+  const roList: OpenRO[] = [];
+  for (const o of open) {
+    const reduceOnly =
+      (o.info?.reduceOnly === true || o.info?.reduceOnly === "true" || (o as any).reduceOnly === true) &&
+      String(o.type || "").toUpperCase().includes("LIMIT");
+    if (!reduceOnly) continue;
+    if (String(o.side || "").toLowerCase() !== sideExit) continue;
+    const amt = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
+    if (amt > 0 && o.id) roList.push({ id: o.id, amount: amt, side: String(o.side), type: String(o.type) });
   }
 
+  const roTotal = roList.reduce((s, x) => s + x.amount, 0);
+  const freeCapacity = Math.max(0, size - roTotal);
+
+  if (target > freeCapacity + 1e-12) {
+    let toCancel = target - freeCapacity;
+    roList.sort((a, b) => a.amount - b.amount); // снимем самых маленьких первыми
+    for (const o of roList) {
+      if (toCancel <= 0) break;
+      try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
+      toCancel -= o.amount;
+    }
+  }
+
+  // MARKET reduce-only
+  await ex.createReduceOnlyMarket(symbolCcxt, sideExit as any, target);
+
+  // Проверка остатка
   await new Promise((r) => setTimeout(r, 600));
   const left = Math.abs(await ex.fetchPositionSize(symbolCcxt));
   const fullyClosed = left < f.minQty * 0.5;
@@ -473,11 +478,29 @@ function buildHelp(mode: UIMode): string {
     "Пресеты:",
     "  preset list",
     "  preset show <name>",
-    "  preset set <name> risk=<num> tp=<a,b,c> ratio=<a,b,c> [default=1]",
+    "  preset set <name> risk=<num> tp=<a,b,c> ratio=<a,b,c> working=contract|mark sl_ticks=<int> [default=1]",
     "  preset default=<name>",
     "  preset delete <name>",
+    "",
+    "ENV (fallback): WORKING_TYPE=contract|mark, STOP_OFFSET_TICKS=1, POLL_INTERVAL_MS=400",
   ];
   return lines.join("\n");
+}
+
+// ====== helpers для пресета/ENV ======
+function resolveWorkingType(preset?: any): WorkingType {
+  // preset.working_type: "contract"|"mark"|"last"
+  const w = String(
+    (preset?.working_type ?? preset?.working ?? process.env.WORKING_TYPE ?? "contract")
+  ).toLowerCase();
+  if (w === "mark") return "MARK_PRICE";
+  if (w === "contract" || w === "last") return "CONTRACT_PRICE";
+  return (ENV_WORKING as WorkingType);
+}
+function resolveStopTicks(preset?: any): number {
+  const val = preset?.stop_offset_ticks ?? preset?.sl_ticks ?? process.env.STOP_OFFSET_TICKS;
+  const n = Math.max(0, Number(val ?? ENV_STOP_TICKS));
+  return Number.isFinite(n) ? Math.floor(n) : ENV_STOP_TICKS;
 }
 
 // ========== Основной обработчик ==========
@@ -526,11 +549,15 @@ export async function runCommand(
 
   if (parsed.kind === "preset_set") {
     const current = await getPreset(parsed.name);
-    const next: TradingPreset = {
+    const next: TradingPreset & { working_type?: string; stop_offset_ticks?: number } = {
       config_name: parsed.name,
       trade_risk: parsed.risk ?? current.trade_risk ?? 100,
       take_profit: parsed.tp ?? current.take_profit ?? [3, 5, 7],
       take_profit_ratio: parsed.ratio ?? current.take_profit_ratio ?? [35, 30, 35],
+      // эти поля сохранятся если ваша реализация trading_config поддерживает их,
+      // иначе при чтении будут взяты из ENV (см. resolve* выше)
+      ...(parsed.working ? { working_type: parsed.working } : {}),
+      ...(parsed.slTicks != null ? { stop_offset_ticks: Math.max(0, Math.floor(parsed.slTicks)) } : {}),
     };
     if (next.take_profit.length !== next.take_profit_ratio.length) {
       info(
@@ -540,7 +567,7 @@ export async function runCommand(
       );
       return;
     }
-    await upsertPreset(next);
+    await upsertPreset(next as any);
     if (parsed.makeDefault) {
       await setDefaultPreset(next.config_name);
     }
@@ -665,28 +692,24 @@ export async function runCommand(
   if (parsed.kind === "close") {
     const { symbol, percent } = parsed;
     const { symbolCcxt } = normalizeTickerToUsdt(symbol);
-    try {
-      const res = await closePositionPercent(ex, symbolCcxt, percent);
-      if (res.closed <= 0) {
-        info(mode === "console" ? `Нет позиции по ${symbolCcxt}.` : `<b>Нет позиции по ${symbolCcxt}</b>`);
-        return;
-      }
-      if (res.fullyClosed) {
-        await ex.cancelAllOrders(symbolCcxt).catch(() => {});
-        info(
-          mode === "console"
-            ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}). Все лимитки сняты.`
-            : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>\nЛимитки сняты.`
-        );
-      } else {
-        info(
-          mode === "console"
-            ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}).`
-            : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>`
-        );
-      }
-    } catch (e:any) {
-      info(`❌ [ERROR] ${e?.message || e}`);
+    const res = await closePositionPercent(ex, symbolCcxt, percent);
+    if (res.closed <= 0) {
+      info(mode === "console" ? `Нет позиции по ${symbolCcxt}.` : `<b>Нет позиции по ${symbolCcxt}</b>`);
+      return;
+    }
+    if (res.fullyClosed) {
+      await ex.cancelAllOrders(symbolCcxt).catch(() => {});
+      info(
+        mode === "console"
+          ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}). Все лимитки сняты.`
+          : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>\nЛимитки сняты.`
+      );
+    } else {
+      info(
+        mode === "console"
+          ? `Закрыл ${symbolCcxt} на ${percent}% (${(res.closed).toFixed(5)}).`
+          : `<b>Закрыл ${symbolCcxt} на ${percent}%.</b>`
+      );
     }
     return;
   }
@@ -716,8 +739,9 @@ export async function runCommand(
       return;
     }
 
-    const tick = await ex.fetchTickerSafe(symbolCcxt);
-    const mark = Number(tick.last ?? (tick as any).mark ?? (tick as any).info?.markPrice);
+    const tick = await ex.fetchTicker(symbolCcxt);
+    const working = resolveWorkingType(await getPreset(DEFAULT_PRESET).catch(()=>null));
+    const ref = getRefPrice(tick, working);
 
     const open = await ex.fetchOpenOrders(symbolCcxt);
     const openIds = new Set(open.filter((o) => o.id).map((o) => o.id as string));
@@ -732,7 +756,7 @@ export async function runCommand(
         continue;
       }
 
-      let isLimit = (parsed.dir === "l" ? leg.price < mark : leg.price > mark);
+      let isLimit = (parsed.dir === "l" ? leg.price < ref : leg.price > ref);
 
       let replacedId: string | undefined;
       if (i < openEntryIdsOrdered.length) {
@@ -742,7 +766,7 @@ export async function runCommand(
 
       let newId: string | undefined;
       try {
-        if (!isLimit && wouldStopImmediatelyTrigger(parsed.dir === "l" ? "long" : "short", leg.price, mark)) {
+        if (!isLimit && wouldStopImmediatelyTrigger(parsed.dir === "l" ? "long" : "short", leg.price, ref)) {
           isLimit = true;
         }
         if (isLimit) {
@@ -751,7 +775,7 @@ export async function runCommand(
           newId = o.id!;
         } else {
           const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx);
+          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx, working);
           newId = o.id!;
         }
       } catch {
@@ -792,13 +816,16 @@ export async function runCommand(
   const sideExit = side === "long" ? "sell" : "buy";
 
   const preset = await getPreset(presetName);
+  const working = resolveWorkingType(preset);
+  const stopTicks = resolveStopTicks(preset);
+
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   ex.loadMarkets && (await ex.loadMarkets().catch(() => {}));
   ex.market(symbolCcxt);
 
-  const t0 = await ex.fetchTickerSafe(symbolCcxt);
-  let markPrice = Number(t0.last ?? (t0 as any).mark ?? (t0 as any).info?.markPrice);
-  if (!markPrice || !(markPrice > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
+  const t0 = await ex.fetchTicker(symbolCcxt);
+  const ref0 = getRefPrice(t0, working);
+  if (!ref0 || !(ref0 > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
 
   const totalUsd = legs.reduce((a, l) => a + l.usd, 0);
   const first = legs[0];
@@ -812,9 +839,9 @@ export async function runCommand(
       side,
       notional: totalUsd,
       approxQty: Number(firstPick.qty.toFixed(5)),
-      now: markPrice,
+      now: ref0,
       entry: first.price,
-      isLimit: side === "long" ? first.price < markPrice : first.price > markPrice,
+      isLimit: side === "long" ? first.price < ref0 : first.price > ref0,
       sl: String(ex.priceToPrecision(symbolCcxt, firstPlan.stopPrice)),
       tps: firstPlan.tpPrices.map((p, i) => ({
         price: String(ex.priceToPrecision(symbolCcxt, p)),
@@ -843,7 +870,7 @@ export async function runCommand(
       continue;
     }
 
-    const isLimitLeg = side === "long" ? leg.price < markPrice : leg.price > markPrice;
+    const isLimitLeg = side === "long" ? leg.price < ref0 : leg.price > ref0;
     try {
       if (isLimitLeg) {
         const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
@@ -851,12 +878,12 @@ export async function runCommand(
         entryIds.push(o.id!);
       } else {
         const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        if (wouldStopImmediatelyTrigger(side, stopPx, markPrice)) {
+        if (wouldStopImmediatelyTrigger(side, stopPx, ref0)) {
           const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
           const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
           entryIds.push(o.id!);
         } else {
-          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx);
+          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx, working);
           entryIds.push(o.id!);
         }
       }
@@ -892,8 +919,8 @@ export async function runCommand(
           return;
         }
 
-        const tick = await ex.fetchTickerSafe(symbolCcxt);
-        const mark = Number(tick.last ?? (tick as any).mark ?? (tick as any).info?.markPrice);
+        const tick = await ex.fetchTicker(symbolCcxt);
+        const ref = getRefPrice(tick, working);
 
         const positions = await ex.fetchAllOpenPositions();
         const my = positions.find((p) => p.symbol === symbolCcxt);
@@ -915,9 +942,9 @@ export async function runCommand(
           // SL пересчитываем при доборе
           await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
           const desiredSL = Number(ex.priceToPrecision(symbolCcxt, re.stopPrice));
-          const safeSL = adjustStopForMark(side, desiredSL, mark, filters.tickSize || 0.0001);
+          const safeSL = adjustStopForRef(side, desiredSL, ref, filters.tickSize || 0.0001, stopTicks);
           const sideExit2 = side === "long" ? "sell" : "buy";
-          await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
+          await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL, working);
 
           // TP ставим только один раз — когда все входы исполнены
           if (entriesLeft === 0 && !tpsPlaced) {
@@ -966,7 +993,7 @@ export async function runCommand(
           if (!open.find((o) => o.id === id)) keep.delete(id);
         }
 
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
       }
     } catch (err: any) {
       book.set(task, "error", err?.message ?? err);
@@ -975,6 +1002,7 @@ export async function runCommand(
   })();
 
   info(
-    "🚀 Входы подбираются к целевому notional по ближайшему шагу. SL пересчитывается только при доборе. TP — один раз после финального добора."
+    `🚀 Триггер: ${working === "MARK_PRICE" ? "MARK" : "CONTRACT"} • SL-отступ: ${stopTicks} тик(а). ` +
+    `SL пересчитывается только при доборе. TP — один раз после финального добора.`
   );
 }
