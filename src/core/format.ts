@@ -1,3 +1,4 @@
+// src/core/format.ts
 // Красивое форматирование для консоли и Telegram
 export type UIMode = "console" | "telegram";
 
@@ -59,6 +60,22 @@ function lineBox(lines: string[], title?: string): string {
 
 function monoBlock(s: string): string { return `<pre>${escapeHtml(s)}</pre>`; }
 function escapeHtml(s: string) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+// ===== Короткий формат времени: dd.mm.yy hh:mm:ss =====
+function two(n: number) { return n < 10 ? `0${n}` : String(n); }
+function formatTime(input?: string): string {
+  if (!input) return "";
+  const parsed = input.includes("T") ? input : input.replace(" ", "T");
+  const d = new Date(parsed);
+  if (Number.isNaN(d.getTime())) return input;
+  const dd = two(d.getDate());
+  const mm = two(d.getMonth() + 1);
+  const yy = two(d.getFullYear() % 100);
+  const hh = two(d.getHours());
+  const mi = two(d.getMinutes());
+  const ss = two(d.getSeconds());
+  return `${dd}.${mm}.${yy} ${hh}:${mi}:${ss}`;
+}
 
 export function fmtSide(mode: UIMode, side: "long"|"short") {
   if (mode === "console") return side === "long" ? g("LONG") : r("SHORT");
@@ -156,7 +173,6 @@ export function formatPositions(
   mode: UIMode,
   list: Array<{ symbol: string; side: "long"|"short"; qty: number; avg: number; pnl: number }>
 ) {
-  // Telegram: компактный вид (тикер, направление, PnL)
   if (mode === "telegram") {
     if (!list.length) return monoBlock("Нет открытых позиций.");
     const compact = makeCompactPositionsTable(
@@ -167,7 +183,6 @@ export function formatPositions(
     return monoBlock(compact);
   }
 
-  // Console: подробный и РОВНЫЙ
   if (!list.length) {
     return lineBox(["Нет открытых позиций."], "POSITIONS");
   }
@@ -177,23 +192,22 @@ export function formatPositions(
   const totalPnlRaw = `${totalPnl > 0 ? "+" : ""}${totalPnl.toFixed(2)}$`;
   const totalPnlColored = totalPnl > 0 ? g(totalPnlRaw) : totalPnl < 0 ? r(totalPnlRaw) : totalPnlRaw;
 
-  // Колонки (сырье для ширин)
   const symCol = items.map(p => shortSymbol(p.symbol));
-  const sideColRaw = items.map(p => (p.side === "long" ? "L" : "S")); // для ширины — без эмодзи
+  const sideColRaw = items.map(p => (p.side === "long" ? "L" : "S"));
   const qtyCol  = items.map(p => fix3(p.qty));
   const avgCol  = items.map(p => fix3(p.avg));
   const pnlRaw  = items.map(p => `${(Number(p.pnl)||0) >= 0 ? "+" : ""}${(Number(p.pnl)||0).toFixed(2)}$`);
 
   const symW  = Math.max(6, ...symCol.map(visLen));
-  const sideW = 1; // L/S
+  const sideW = 1;
   const qtyW  = Math.max(8, ...qtyCol.map(visLen));
   const avgW  = Math.max(8, ...avgCol.map(visLen));
-  const pnlW  = Math.max(8, ...pnlRaw.map(s => s.length)); // ширина по RAW без ANSI
+  const pnlW  = Math.max(8, ...pnlRaw.map(s => s.length));
 
   const rows = items.map((p, idx) => {
     const sym = padVisEnd(symCol[idx], symW);
-    const tagRaw = sideColRaw[idx];                       // "L" | "S"
-    const tag = tagRaw === "L" ? g("L") : r("S");         // цвет только после паддинга
+    const tagRaw = sideColRaw[idx];
+    const tag = tagRaw === "L" ? g("L") : r("S");
     const tagPadded = padVisEnd(tag, sideW);
 
     const q   = padVisEnd(qtyCol[idx], qtyW);
@@ -203,7 +217,6 @@ export function formatPositions(
     const pnlPadded = padVisStart(pnlSRaw, pnlW);
     const pnlColored = (Number(p.pnl)||0) > 0 ? g(pnlPadded) : (Number(p.pnl)||0) < 0 ? r(pnlPadded) : pnlPadded;
 
-    // Собираем ровную строку; всё — строки, никаких объектов
     return `${sym} ${tagPadded}  q=${q}  avg=${avg}  PnL=${pnlColored}`;
   });
 
@@ -215,17 +228,48 @@ export function formatPositions(
   return lineBox(lines, "POSITIONS");
 }
 
-export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string; symbol:string; label:string; agoSec:number; error?:string }>) {
+export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string; symbol:string; label:string; created:string; error?:string }>) {
   if (!rows.length) return mode === "console" ? lineBox(["Нет активных задач."], "TASKS") : monoBlock("Нет активных задач.");
-  const lines = rows.map(t => `#${t.id} [${t.status}] ${t.symbol}  (+${t.agoSec}s)${t.error?` ERR:${t.error}`:""}`);
-  return mode === "console" ? lineBox(lines, "TASKS") : monoBlock(lines.join("\n"));
-}
+  // колонки: #id, status, symbol, created, label
+  const items = rows.map(r => ({
+    id: r.id,
+    status: r.status,
+    symbol: shortSymbol(r.symbol).toUpperCase(),
+    created: formatTime(r.created),
+    label: r.label,
+    err: r.error
+  }));
 
-export function banner(mode: UIMode, main: string, sub?: string) {
-  const mainLine = b(c(main));
-  return mode === "console"
-    ? lineBox([mainLine, ...(sub ? [dim(sub)] : [])], "SMART TRADE")
-    : monoBlock(`SMART TRADE\n${main}${sub?`\n${sub}`:""}`);
+  if (mode === "telegram") {
+    // Компактный стиль как в orders: группировка по символу, краткие строки
+    const sorted = [...items].sort((a,b)=>{
+      if (a.symbol !== b.symbol) return a.symbol.localeCompare(b.symbol);
+      if (a.status !== b.status) return a.status.localeCompare(b.status);
+      return a.id - b.id;
+    });
+    const ell = (s:string, max=64) => (s.length <= max ? s : (s.slice(0, max-1) + "…"));
+
+    const out: string[] = [];
+    let lastSym = "";
+    for (const i of sorted) {
+      if (i.symbol !== lastSym) {
+        if (lastSym) out.push("");
+        out.push(`▶ ${i.symbol}`);
+        lastSym = i.symbol;
+      }
+      const warn = i.err ? " ⚠️" : "";
+      out.push(
+        `  #${i.id} ${i.status}${warn}`,
+        `  ${i.created}`,
+        `  ${ell(i.label)}`
+      );
+      if (i.err) out.push(`  err: ${ell(String(i.err), 80)}`);
+    }
+    return monoBlock(out.join("\n"));
+  }
+
+  const lines = items.map(i => `#${i.id} [${i.status}] ${i.symbol}  ${i.created}  ${i.label}${i.err?`  ERR:${i.err}`:""}`);
+  return lineBox(lines, "TASKS");
 }
 
 // ------ Пресеты ------
@@ -243,4 +287,147 @@ export function formatPresetList(mode: UIMode, list: Array<{ name: string; isDef
   if (!list.length) return mode === "console" ? lineBox(["Пресетов нет."], "PRESETS") : monoBlock("Пресетов нет.");
   const lines = list.map(p => `${p.isDefault ? "★ " : "  "}${p.name}`);
   return mode === "console" ? lineBox(lines, "PRESETS") : monoBlock(lines.join("\n"));
+}
+
+// ------ Баннер (добавлено) ------
+export function banner(mode: UIMode, main: string, sub?: string) {
+  const mainLine = b(c(main));
+  return mode === "console"
+    ? lineBox([mainLine, ...(sub ? [dim(sub)] : [])], "SMART TRADE")
+    : monoBlock(`SMART TRADE\n${main}${sub?`\n${sub}`:""}`);
+}
+
+// ===== НОВОЕ: формат таблицы ордеров =====
+export function formatOrders(
+  mode: UIMode,
+  rows: Array<{
+    id: string;
+    symbol: string;
+    kind: "LIMIT" | "STOP";
+    side: "buy" | "sell";
+    qty: number;
+    price?: number;
+    stopPrice?: number;
+    reduceOnly?: boolean;
+    closePosition?: boolean;
+    datetime?: string;
+    status?: string;
+  }>
+) {
+  if (!rows.length) {
+    return mode === "console" ? lineBox(["Открытых ордеров нет."], "ORDERS") : monoBlock("Открытых ордеров нет.");
+  }
+
+  const items = rows.map(r => ({
+    id: r.id,
+    sym: shortSymbol(r.symbol).toUpperCase(),
+    kind: r.kind,
+    side: r.side.toLowerCase() === "buy" ? "B" : "S",
+    qty: fix3(r.qty),
+    px: r.kind === "LIMIT" ? (r.price ?? 0) : (r.stopPrice ?? 0),
+    ro: r.reduceOnly ? "RO" : "",
+    cp: r.closePosition ? "CP" : "",
+    dt: formatTime(r.datetime || ""),
+    st: r.status || ""
+  }));
+
+  // Телеграм: карточки (устойчивые к узким экранам и эмодзи)
+  if (mode === "telegram") {
+    const sorted = [...items].sort((a,b)=>{
+      if (a.sym !== b.sym) return a.sym.localeCompare(b.sym);
+      if (a.kind !== b.kind) return a.kind === "STOP" ? -1 : 1; // STOP раньше LIMIT
+      return String(a.dt||"").localeCompare(String(b.dt||""));
+    });
+
+    const out: string[] = [];
+    let lastSym = "";
+    for (const i of sorted) {
+      if (i.sym !== lastSym) {
+        if (lastSym) out.push("");
+        out.push(`▶ ${i.sym}`);
+        lastSym = i.sym;
+      }
+      const sideTagTxt = i.side === "B" ? "BUY" : "SELL";
+      const flags = [i.ro, i.cp].filter(Boolean).join(",");
+      out.push(
+        `  ${i.kind} ${sideTagTxt}`,
+        `  qty: ${i.qty}   px: ${i.px}`,
+        (i.st || i.dt) ? `  ${i.st}${i.st && i.dt ? " • " : ""}${i.dt}` : `  `,
+        `  id: ${i.id}${flags ? `   flags: ${flags}` : ""}`
+      );
+    }
+    return monoBlock(out.join("\n"));
+  }
+
+  // Консоль: табличная версия
+  const wId  = Math.max(10, ...items.map(i=>i.id.length));
+  const wSym = Math.max(6, ...items.map(i=>i.sym.length));
+  const wKind= 5;
+  const wSide= 1;
+  const wQty = Math.max(8, ...items.map(i=>i.qty.length));
+  const wPx  = Math.max(10, ...items.map(i=>String(i.px).length));
+  const wSt  = Math.max(6, ...items.map(i=>i.st.length));
+  const header = [
+    padVisEnd("id", wId),
+    padVisEnd("symbol", wSym),
+    padVisEnd("type", wKind),
+    padVisEnd("S", wSide),
+    padVisStart("qty", wQty),
+    padVisStart("px/stop", wPx),
+    padVisEnd("flags", 6),
+    padVisEnd("status", wSt),
+    "datetime"
+  ].join("  ");
+  const sep = "-".repeat(visLen(header));
+
+  const lines = items.map(i => {
+    const s = i.side === "B" ? g("B") : r("S");
+    const flags = [i.ro, i.cp].filter(Boolean).join(",");
+    return [
+      padVisEnd(i.id, wId),
+      padVisEnd(i.sym, wSym),
+      padVisEnd(i.kind, wKind),
+      padVisEnd(s, wSide),
+      padVisStart(i.qty, wQty),
+      padVisStart(String(i.px), wPx),
+      padVisEnd(flags, 6),
+      padVisEnd(i.st, wSt),
+      i.dt
+    ].join("  ");
+  });
+
+  return lineBox([header, sep, ...lines], "ORDERS");
+}
+
+// ===== НОВОЕ: детальная инфа по таске =====
+export function formatTaskInfo(
+  mode: UIMode,
+  p: {
+    id: number;
+    status: string;
+    symbol: string;
+    label: string;
+    createdAt: string;
+    updatedAt: string;
+    side?: "long"|"short";
+    totalUsd?: number;
+    presetName?: string;
+    entryOrderIds?: string[];
+    error?: string;
+  }
+) {
+  const lines = [
+    `id: ${p.id}`,
+    `status: ${p.status}`,
+    `symbol: ${p.symbol}`,
+    `label: ${p.label}`,
+    `created: ${formatTime(p.createdAt)}`,
+    `updated: ${formatTime(p.updatedAt)}`,
+    ...(p.side ? [`side: ${p.side}`] : []),
+    ...(typeof p.totalUsd === "number" ? [`planned_usd: ${p.totalUsd}`] : []),
+    ...(p.presetName ? [`preset: ${p.presetName}`] : []),
+    `entries: ${(p.entryOrderIds||[]).join(", ") || "-"}`,
+    ...(p.error ? [`error: ${p.error}`] : []),
+  ];
+  return mode === "console" ? lineBox(lines, "TASK INFO") : monoBlock(lines.join("\n"));
 }

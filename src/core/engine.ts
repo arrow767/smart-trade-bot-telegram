@@ -8,7 +8,7 @@ import {
   TradingPreset,
 } from "../config/trading_config";
 import { normalizeTickerToUsdt } from "./SymbolResolver";
-import { BinanceFutures, WorkingType } from "../exch/BinanceFutures";
+import { BinanceFutures } from "../exch/BinanceFutures";
 import { planTargets } from "./Planner";
 import { splitQtyToStep, mergeDustToPrev } from "../utils/math";
 import {
@@ -20,7 +20,11 @@ import {
   formatTasks,
   formatPreset,
   formatPresetList,
+  formatTaskInfo,
+  formatOrders, // NEW
 } from "./format";
+import fs from "fs";
+import path from "path";
 
 // ========== Типы команд/задач ==========
 
@@ -31,9 +35,10 @@ export type ParsedCmd =
       kind: "trade";
       dir: "l" | "s";
       rawTicker: string;
-      legs: TradeLeg[];
+      legs: TradeLeg[];          // для LIMIT/STOP
       presetName: string;
       dryRun: boolean;
+      market?: { usd: number } | null; // НОВОЕ: если задано — вход по рынку (без цен)
     }
   | { kind: "help" }
   | { kind: "tasks" }
@@ -47,8 +52,16 @@ export type ParsedCmd =
   // управление пресетами:
   | { kind: "preset_list" }
   | { kind: "preset_show"; name: string }
-  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean; working?: string; slTicks?: number }
-  | { kind: "preset_delete"; name: string };
+  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean }
+  | { kind: "preset_delete"; name: string }
+  // инфо по таске
+  | { kind: "task_info"; id: number }
+  // НОВОЕ: ордера
+  | { kind: "orders"; symbol?: string }
+  | { kind: "cancel_order"; id: string }
+  | { kind: "cancel_limit_symbol"; symbol: string }
+  | { kind: "cancel_stop_symbol"; symbol: string }
+  | { kind: "cancel_all_orders"; sub: "all" | "limit" | "stop" };
 
 export type TaskStatus =
   | "queued"
@@ -71,24 +84,75 @@ export type Task = {
   updatedAt: Date;
   entryOrderIds?: string[];
   cancelRequested?: boolean;
+  // НОВОЕ: для восстановления и инфо
+  side?: "long" | "short";
+  totalUsd?: number;        // суммарный план по legs / для риска
+  presetName?: string;
 };
 
 export const DEFAULT_PRESET = "4h";
 const NOTIONAL_BIAS: "nearest" | "down" | "up" = "nearest";
 
-// ===== Новые дефолты (env) =====
-const ENV_WORKING = String(process.env.WORKING_TYPE || "contract").toLowerCase() === "mark" ? "MARK_PRICE" : "CONTRACT_PRICE";
-const ENV_STOP_TICKS = Math.max(0, Number(process.env.STOP_OFFSET_TICKS || "1")) || 1;
-const POLL_INTERVAL_MS = Math.max(200, Number(process.env.POLL_INTERVAL_MS || "400")) || 400;
+// ======== persist tasks to JSON ========
+const DATA_DIR = path.resolve(process.cwd(), "data");
+const TASKS_JSON = path.join(DATA_DIR, "tasks.json");
 
-// ========== Книга задач ==========
+function ensureDir(pth: string) {
+  try { fs.mkdirSync(pth, { recursive: true }); } catch {}
+}
 
 let TASK_ID_SEQ = 1;
 
 export class TaskBook {
   public tasks = new Map<number, Task>();
 
-  add(symbolCcxt: string, label: string) {
+  constructor() {
+    this.load();
+    // восстановим последовательность идентификаторов
+    for (const id of this.tasks.keys()) TASK_ID_SEQ = Math.max(TASK_ID_SEQ, id + 1);
+  }
+
+  private save() {
+    try {
+      ensureDir(DATA_DIR);
+      const out = JSON.stringify(
+        Array.from(this.tasks.values()).map(t => ({
+          ...t,
+          startedAt: t.startedAt?.toISOString?.() ?? new Date().toISOString(),
+          updatedAt: t.updatedAt?.toISOString?.() ?? new Date().toISOString(),
+        })),
+        null,
+        2
+      );
+      fs.writeFileSync(TASKS_JSON, out, "utf-8");
+    } catch {}
+  }
+
+  private load() {
+    try {
+      if (!fs.existsSync(TASKS_JSON)) return;
+      const raw = JSON.parse(fs.readFileSync(TASKS_JSON, "utf-8")) as any[];
+      for (const o of raw || []) {
+        const t: Task = {
+          id: Number(o.id),
+          symbolCcxt: String(o.symbolCcxt),
+          label: String(o.label),
+          status: String(o.status) as TaskStatus,
+          error: o.error ? String(o.error) : undefined,
+          startedAt: new Date(o.startedAt),
+          updatedAt: new Date(o.updatedAt),
+          entryOrderIds: Array.isArray(o.entryOrderIds) ? o.entryOrderIds.map(String) : [],
+          cancelRequested: !!o.cancelRequested,
+          side: (o.side === "long" || o.side === "short") ? o.side : undefined,
+          totalUsd: Number(o.totalUsd || 0) || undefined,
+          presetName: o.presetName ? String(o.presetName) : undefined,
+        };
+        this.tasks.set(t.id, t);
+      }
+    } catch {}
+  }
+
+  add(symbolCcxt: string, label: string, extras?: { side?: "long"|"short"; totalUsd?: number; presetName?: string }) {
     const t: Task = {
       id: TASK_ID_SEQ++,
       symbolCcxt,
@@ -96,8 +160,12 @@ export class TaskBook {
       status: "queued",
       startedAt: new Date(),
       updatedAt: new Date(),
+      side: extras?.side,
+      totalUsd: extras?.totalUsd,
+      presetName: extras?.presetName,
     };
     this.tasks.set(t.id, t);
+    this.save();
     return t;
   }
 
@@ -105,15 +173,21 @@ export class TaskBook {
     t.status = s;
     t.updatedAt = new Date();
     if (err) t.error = err;
+    this.save();
   }
 
   list() {
     return Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
   }
 
+  get(id: number) {
+    return this.tasks.get(id);
+  }
+
   setEntryOrders(t: Task, ids: string[]) {
     t.entryOrderIds = ids;
     t.updatedAt = new Date();
+    this.save();
   }
 
   requestCancel(id: number) {
@@ -121,15 +195,19 @@ export class TaskBook {
     if (t) {
       t.cancelRequested = true;
       t.updatedAt = new Date();
+      this.save();
     }
   }
 
   requestCancelAll() {
     for (const t of this.tasks.values()) t.cancelRequested = true;
+    this.save();
   }
 
-  isCancelRequested(id: number) {
-    return !!this.tasks.get(id)?.cancelRequested;
+  /** НОВОЕ: полное удаление таски */
+  remove(id: number) {
+    this.tasks.delete(id);
+    this.save();
   }
 }
 
@@ -141,6 +219,25 @@ function parseNumsCSV(s?: string): number[] | undefined {
   const nums = parts.map((x) => Number(x));
   if (nums.some((n) => !Number.isFinite(n))) return undefined;
   return nums;
+}
+
+// --- НОВОЕ: утилиты для ордеров ---
+function isStopOrder(o: any): boolean {
+  const t = String(o.type || o.info?.type || "").toUpperCase();
+  return t.includes("STOP"); // STOP, STOP_MARKET, STOP_LOSS_LIMIT, TAKE_PROFIT_* (если есть STOP)
+}
+function isLimitOrder(o: any): boolean {
+  const t = String(o.type || o.info?.type || "").toUpperCase();
+  return t.includes("LIMIT") && !t.includes("STOP");
+}
+async function collectSymbolsForOrders(ex: BinanceFutures, book: TaskBook): Promise<string[]> {
+  const set = new Set<string>();
+  for (const t of book.list()) set.add(t.symbolCcxt);
+  try {
+    const positions = await ex.fetchAllOpenPositions();
+    for (const p of positions) if ((p.contracts ?? 0) > 0) set.add(p.symbol);
+  } catch {}
+  return Array.from(set.values());
 }
 
 export function parseLine(line: string): ParsedCmd | null {
@@ -179,6 +276,7 @@ export function parseLine(line: string): ParsedCmd | null {
       return { kind: "preset_delete", name };
     }
 
+    // FIXED: "или" → "||"
     if (sub === "set" || sub === "add") {
       const name = p[2];
       if (!name) return null;
@@ -191,9 +289,7 @@ export function parseLine(line: string): ParsedCmd | null {
       const tp = parseNumsCSV(kv.get("tp") || kv.get("take_profit"));
       const ratio = parseNumsCSV(kv.get("ratio") || kv.get("take_profit_ratio"));
       const makeDefault = kv.get("default") === "1" || kv.get("default") === "true";
-      const working = kv.get("working");        // contract|mark|last
-      const slTicks = kv.has("sl_ticks") ? Number(kv.get("sl_ticks")) : undefined;
-      return { kind: "preset_set", name, risk, tp, ratio, makeDefault, working, slTicks };
+      return { kind: "preset_set", name, risk, tp, ratio, makeDefault };
     }
 
     if (sub.startsWith("default")) {
@@ -204,11 +300,51 @@ export function parseLine(line: string): ParsedCmd | null {
     }
   }
 
+  // --- инфо по таске ---
+  if (cmd === "info" && p[1]) {
+    const id = Number(p[1]);
+    if (!Number.isFinite(id)) return null;
+    return { kind: "task_info", id };
+  }
+
+  // --- НОВОЕ: ордера / отмена ордеров ---
+  if (cmd === "orders") {
+    const sym = p[1];
+    if (sym) {
+      const { symbolCcxt } = normalizeTickerToUsdt(sym);
+      return { kind: "orders", symbol: symbolCcxt };
+    }
+    return { kind: "orders" };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "order" && p[2]) {
+    return { kind: "cancel_order", id: p[2] };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "limit" && p[2]) {
+    const { symbolCcxt } = normalizeTickerToUsdt(p[2]);
+    return { kind: "cancel_limit_symbol", symbol: symbolCcxt };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "stop" && p[2]) {
+    const { symbolCcxt } = normalizeTickerToUsdt(p[2]);
+    return { kind: "cancel_stop_symbol", symbol: symbolCcxt };
+  }
+
+  if (cmd === "cancel-all") {
+    const sub1 = (p[1]||"").toLowerCase();
+    const sub2 = (p[2]||"").toLowerCase();
+    if (sub1 === "orders" && !sub2) return { kind: "cancel_all_orders", sub: "all" };
+    if (sub1 === "limit" && sub2 === "orders") return { kind: "cancel_all_orders", sub: "limit" };
+    if (sub1 === "stop" && sub2 === "orders") return { kind: "cancel_all_orders", sub: "stop" };
+  }
+
   // --- стандартные команды ---
   if (cmd === "cancel" && p[1]) return { kind: "cancel", id: Number(p[1]) };
   if (cmd === "cancel-all") return { kind: "cancel_all" };
   if (cmd === "close" && p[1]) {
     const symbol = p[1];
+    // FIXED: anst percent → const percent
     const percent = p[2] ? Math.max(0, Math.min(100, Number(p[2]))) : 100;
     return { kind: "close", symbol, percent: Number.isFinite(percent) ? percent : 100 };
   }
@@ -223,7 +359,8 @@ export function parseLine(line: string): ParsedCmd | null {
     return { kind: "deposit" };
   if (["exit", "quit"].includes(cmd)) return { kind: "exit" };
 
-  // edit <id> <l|s> <symbol> <usd1> <price1> [<usd2> <price2> ...]
+  // --- редактирование входов ---
+  // edit <id> <l|s> <sym> <usd1> <price1> [<usd2> <price2> ...]
   if (
     cmd === "edit" &&
     p[1] &&
@@ -247,11 +384,27 @@ export function parseLine(line: string): ParsedCmd | null {
     return { kind: "edit", id, dir, rawTicker, legs };
   }
 
-  // trade
+  // --- торги ---
   if (!["l", "s"].includes(cmd)) return null;
 
   const rawTicker = p[1];
   if (!rawTicker) return null;
+
+  // MARKET-вход краткий: l <sym> <usd> [preset]
+  // Если после тикера только один числовой аргумент, дальше — либо конец, либо preset
+  if (p.length >= 3 && isFinite(Number(p[2])) && (p.length === 3 || isNaN(Number(p[3])))) {
+    const usd = Number(p[2]);
+    const presetName = p[3] ? p[3] : DEFAULT_PRESET;
+    return {
+      kind: "trade",
+      dir: cmd as "l" | "s",
+      rawTicker,
+      legs: [],
+      market: { usd },
+      presetName,
+      dryRun: false,
+    };
+  }
 
   const legs: TradeLeg[] = [];
   let i = 2;
@@ -274,7 +427,7 @@ export function parseLine(line: string): ParsedCmd | null {
     presetName = p[i];
   }
 
-  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun };
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null };
 }
 
 // ========== Утилиты торговли ==========
@@ -345,30 +498,16 @@ function computeQtyForUsdSmart(
   };
 }
 
-// рабочая цена для сравнения (в зависимости от workingType)
-function getRefPrice(tick: any, working: WorkingType): number {
-  const last = Number(tick.last ?? tick.info?.lastPrice ?? 0);
-  const mark = Number(tick.mark ?? tick.info?.markPrice ?? 0);
-  return working === "MARK_PRICE" ? mark || last : last || mark;
+function wouldStopImmediatelyTrigger(side: "long" | "short", stopPrice: number, mark: number) {
+  return side === "long" ? stopPrice <= mark : stopPrice >= mark;
 }
 
-function wouldStopImmediatelyTrigger(side: "long" | "short", stopPrice: number, ref: number) {
-  return side === "long" ? stopPrice <= ref : stopPrice >= ref;
-}
-
-function adjustStopForRef(
-  side: "long" | "short",
-  desired: number,
-  ref: number,
-  tick: number,
-  ticksOffset: number
-) {
-  const off = Math.max(0, Math.floor(ticksOffset)) * (tick || 0);
+function adjustStopForMark(side: "long" | "short", desired: number, mark: number, tick: number) {
   if (side === "long") {
-    const safe = ref - off;
+    const safe = mark - 2 * tick;
     return Math.min(desired, safe);
   } else {
-    const safe = ref + off;
+    const safe = mark + 2 * tick;
     return Math.max(desired, safe);
   }
 }
@@ -397,14 +536,12 @@ async function cancelBracketOnly(ex: BinanceFutures, symbolCcxt: string, keepIds
   }
 }
 
-// ✅ Частичное/полное закрытие: если reduce-only MARKET не проходит из-за занятой квоты TP,
-// снимаем минимально нужное количество reduce-only лимиток, затем выполняем MARKET.
+// ✅ Частичное/полное закрытие (с обработкой ReduceOnly блокировок)
 async function closePositionPercent(
   ex: BinanceFutures,
   symbolCcxt: string,
   percent: number
 ): Promise<{ closed: number; sideExit: "buy" | "sell"; fullyClosed: boolean }> {
-  // получаем SIGNED размер
   const amtSigned = await ex.fetchPositionSize(symbolCcxt);
   const sideExit: "buy" | "sell" = amtSigned > 0 ? "sell" : "buy";
   const size = Math.abs(amtSigned);
@@ -443,10 +580,8 @@ async function closePositionPercent(
     }
   }
 
-  // MARKET reduce-only
   await ex.createReduceOnlyMarket(symbolCcxt, sideExit as any, target);
 
-  // Проверка остатка
   await new Promise((r) => setTimeout(r, 600));
   const left = Math.abs(await ex.fetchPositionSize(symbolCcxt));
   const fullyClosed = left < f.minQty * 0.5;
@@ -463,6 +598,7 @@ function buildHelp(mode: UIMode): string {
     "Торговля:",
     "  l <sym> <usd1> <price1> [<usd2> <price2> ...] [preset]",
     "  s <sym> <usd1> <price1> [<usd2> <price2> ...] [preset]",
+    "  МАРКЕТ: l <sym> <usd> [preset]  (пример: l xrp 500 4h)",
     "  Пример: l xrp 500 2.35 300 2.33 4h",
     "",
     "Редактирование входов:",
@@ -471,36 +607,28 @@ function buildHelp(mode: UIMode): string {
     "",
     "Управление позициями и задачами:",
     "  close <symbol> [percent]      — закрыть позицию полностью/частично",
-    "  cancel <taskId>               — отменить задачу",
-    "  cancel-all                    — отменить все задачи",
+    "  cancel <taskId>               — отменить задачу и удалить её",
+    "  cancel-all                    — отменить все задачи и удалить их",
+    "  info <taskId>                 — подробности по задаче",
     "  positions | deposit | tasks   — инфо",
+    "",
+    "Ордеры:",
+    "  orders [symbol]               — показать открытые ордера",
+    "  cancel order <id>             — снять ордер по ID",
+    "  cancel limit <symbol>         — снять все LIMIT по символу",
+    "  cancel stop <symbol>          — снять все STOP по символу",
+    "  cancel-all orders             — снять все ордера (видимые боту)",
+    "  cancel-all limit orders       — снять все LIMIT ордера",
+    "  cancel-all stop orders        — снять все STOP ордера",
     "",
     "Пресеты:",
     "  preset list",
     "  preset show <name>",
-    "  preset set <name> risk=<num> tp=<a,b,c> ratio=<a,b,c> working=contract|mark sl_ticks=<int> [default=1]",
+    "  preset set <name> risk=<num> tp=<a,b,c> ratio=<a,b,c> [default=1]",
     "  preset default=<name>",
     "  preset delete <name>",
-    "",
-    "ENV (fallback): WORKING_TYPE=contract|mark, STOP_OFFSET_TICKS=1, POLL_INTERVAL_MS=400",
   ];
   return lines.join("\n");
-}
-
-// ====== helpers для пресета/ENV ======
-function resolveWorkingType(preset?: any): WorkingType {
-  // preset.working_type: "contract"|"mark"|"last"
-  const w = String(
-    (preset?.working_type ?? preset?.working ?? process.env.WORKING_TYPE ?? "contract")
-  ).toLowerCase();
-  if (w === "mark") return "MARK_PRICE";
-  if (w === "contract" || w === "last") return "CONTRACT_PRICE";
-  return (ENV_WORKING as WorkingType);
-}
-function resolveStopTicks(preset?: any): number {
-  const val = preset?.stop_offset_ticks ?? preset?.sl_ticks ?? process.env.STOP_OFFSET_TICKS;
-  const n = Math.max(0, Number(val ?? ENV_STOP_TICKS));
-  return Number.isFinite(n) ? Math.floor(n) : ENV_STOP_TICKS;
 }
 
 // ========== Основной обработчик ==========
@@ -516,6 +644,100 @@ export async function runCommand(
   // --- help ---
   if (parsed.kind === "help") {
     info(mode === "console" ? buildHelp(mode) : `<pre>${buildHelp(mode)}</pre>`);
+    return;
+  }
+
+  // --- НОВОЕ: просмотр ордеров ---
+  if (parsed.kind === "orders") {
+    const rows: Array<{
+      id: string; symbol: string; kind: "LIMIT"|"STOP"; side: "buy"|"sell";
+      qty: number; price?: number; stopPrice?: number; reduceOnly?: boolean;
+      closePosition?: boolean; datetime?: string; status?: string;
+    }> = [];
+    const symbols = parsed.symbol ? [parsed.symbol] : await collectSymbolsForOrders(ex, book);
+    for (const sym of symbols) {
+      try {
+        const open = await ex.fetchOpenOrders(sym);
+        for (const o of open) {
+          rows.push({
+            id: String(o.id || o.info?.orderId || ""),
+            symbol: sym,
+            kind: isStopOrder(o) ? "STOP" : "LIMIT",
+            side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
+            qty: Number(o.amount ?? o.info?.origQty ?? 0) || 0,
+            price: Number(o.price ?? o.info?.price ?? 0) || undefined,
+            stopPrice: Number(o.info?.stopPrice ?? 0) || undefined,
+            reduceOnly: (o.info?.reduceOnly === true || o.info?.reduceOnly === "true"),
+            closePosition: (o.info?.closePosition === true || o.info?.closePosition === "true"),
+            datetime: (o.datetime || (o.lastTradeTimestamp ? new Date(o.lastTradeTimestamp).toISOString().slice(0,19).replace("T"," ") : "")),
+            status: String(o.status || o.info?.status || ""),
+          });
+        }
+      } catch {}
+    }
+    rows.sort((a,b)=>{
+      if (a.kind !== b.kind) return a.kind === "STOP" ? -1 : 1;
+      if (a.symbol !== b.symbol) return a.symbol.localeCompare(b.symbol);
+      return String(a.datetime||"").localeCompare(String(b.datetime||""));
+    });
+    info(formatOrders(mode, rows));
+    return;
+  }
+
+  // --- НОВОЕ: отмена ордера по id (ищем по известным символам) ---
+  if (parsed.kind === "cancel_order") {
+    const id = parsed.id;
+    const symbols = await collectSymbolsForOrders(ex, book);
+    let ok = false;
+    for (const sym of symbols) {
+      try {
+        await ex.cancelOrder(sym, id);
+        ok = true;
+        info(mode === "console" ? `Снял ордер ${id} (${sym}).` : `<b>Снял ордер</b> <code>${id}</code> для <code>${sym}</code>.`);
+        break;
+      } catch {}
+    }
+    if (!ok) {
+      info(mode === "console" ? `Ордер ${id} не найден (или уже снят).` : `<b>Ордер не найден</b>: <code>${id}</code>.`);
+    }
+    return;
+  }
+
+  // --- НОВОЕ: отмена лимитных/стоп-ордеров по символу ---
+  if (parsed.kind === "cancel_limit_symbol" || parsed.kind === "cancel_stop_symbol") {
+    const sym = parsed.symbol;
+    try {
+      const open = await ex.fetchOpenOrders(sym);
+      const toCancel = open.filter(o => parsed.kind === "cancel_limit_symbol" ? isLimitOrder(o) : isStopOrder(o));
+      for (const o of toCancel) { try { await ex.cancelOrder(sym, String(o.id)); } catch {} }
+      info(
+        mode === "console"
+          ? `Снял ${toCancel.length} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров по ${sym}.`
+          : `<b>Снял ${toCancel.length} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров</b> по <code>${sym}</code>.`
+      );
+    } catch (e:any) {
+      info(mode === "console" ? `Ошибка: ${e?.message || e}` : `<b>Ошибка:</b> ${e?.message || e}`);
+    }
+    return;
+  }
+
+  // --- НОВОЕ: cancel-all по типам ---
+  if (parsed.kind === "cancel_all_orders") {
+    const modeSub = parsed.sub; // all | limit | stop
+    const symbols = await collectSymbolsForOrders(ex, book);
+    let total = 0;
+    for (const sym of symbols) {
+      try {
+        const open = await ex.fetchOpenOrders(sym);
+        const toCancel = open.filter(o => {
+          if (modeSub === "all") return true;
+          if (modeSub === "limit") return isLimitOrder(o);
+          return isStopOrder(o);
+        });
+        for (const o of toCancel) { try { await ex.cancelOrder(sym, String(o.id)); total++; } catch {} }
+      } catch {}
+    }
+    info(mode === "console" ? `Снял ${total} ордеров (${modeSub}).` : `<b>Снял ${total} ордеров</b> (${modeSub}).`);
     return;
   }
 
@@ -549,15 +771,11 @@ export async function runCommand(
 
   if (parsed.kind === "preset_set") {
     const current = await getPreset(parsed.name);
-    const next: TradingPreset & { working_type?: string; stop_offset_ticks?: number } = {
+    const next: TradingPreset = {
       config_name: parsed.name,
       trade_risk: parsed.risk ?? current.trade_risk ?? 100,
       take_profit: parsed.tp ?? current.take_profit ?? [3, 5, 7],
       take_profit_ratio: parsed.ratio ?? current.take_profit_ratio ?? [35, 30, 35],
-      // эти поля сохранятся если ваша реализация trading_config поддерживает их,
-      // иначе при чтении будут взяты из ENV (см. resolve* выше)
-      ...(parsed.working ? { working_type: parsed.working } : {}),
-      ...(parsed.slTicks != null ? { stop_offset_ticks: Math.max(0, Math.floor(parsed.slTicks)) } : {}),
     };
     if (next.take_profit.length !== next.take_profit_ratio.length) {
       info(
@@ -567,7 +785,7 @@ export async function runCommand(
       );
       return;
     }
-    await upsertPreset(next as any);
+    await upsertPreset(next);
     if (parsed.makeDefault) {
       await setDefaultPreset(next.config_name);
     }
@@ -647,7 +865,7 @@ export async function runCommand(
       status: t.status,
       symbol: t.symbolCcxt,
       label: t.label,
-      agoSec: Math.round((Date.now() - t.startedAt.getTime()) / 1000),
+      created: t.startedAt.toISOString().replace("T", " ").slice(0, 19),
       error: t.error,
     }));
     info(formatTasks(mode, rows));
@@ -655,12 +873,12 @@ export async function runCommand(
   }
 
   if (parsed.kind === "cancel") {
-    const t = book.tasks.get(parsed.id);
+    const t = book.get(parsed.id);
     if (!t) {
       info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
       return;
     }
-    book.requestCancel(parsed.id);
+    // Снимаем все связанные ордера и УДАЛЯЕМ таску из книги
     try {
       const keep = new Set(t.entryOrderIds || []);
       await cancelBracketOnly(ex, t.symbolCcxt, keep).catch(() => {});
@@ -668,24 +886,23 @@ export async function runCommand(
         await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
       }
     } catch {}
-    book.set(t, "canceled");
-    info(mode === "console" ? `Отменил задачу #${parsed.id}.` : `<b>Отменил задачу #${parsed.id}</b>`);
+    book.remove(t.id); // НОВОЕ: удаляем полностью
+    info(mode === "console" ? `Удалил задачу #${parsed.id}.` : `<b>Удалил задачу #${parsed.id}</b>`);
     return;
   }
 
   if (parsed.kind === "cancel_all") {
-    book.requestCancelAll();
-    for (const t of book.tasks.values()) {
+    for (const t of book.list()) {
       try {
         const keep = new Set(t.entryOrderIds || []);
         await cancelBracketOnly(ex, t.symbolCcxt, keep).catch(() => {});
         for (const id of keep) {
           await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
         }
-        book.set(t, "canceled");
       } catch {}
+      book.remove(t.id);
     }
-    info(mode === "console" ? `Все задачи отменены.` : `<b>Все задачи отменены</b>`);
+    info(mode === "console" ? `Все задачи удалены.` : `<b>Все задачи удалены</b>`);
     return;
   }
 
@@ -715,8 +932,32 @@ export async function runCommand(
   }
 
   // --- редактирование входов ---
+  if (parsed.kind === "task_info") {
+    const t = book.get(parsed.id);
+    if (!t) {
+      info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
+      return;
+    }
+    info(
+      formatTaskInfo(mode, {
+        id: t.id,
+        status: t.status,
+        symbol: t.symbolCcxt,
+        label: t.label,
+        createdAt: t.startedAt.toISOString().replace("T"," ").slice(0,19),
+        updatedAt: t.updatedAt.toISOString().replace("T"," ").slice(0,19),
+        side: t.side,
+        totalUsd: t.totalUsd,
+        presetName: t.presetName,
+        entryOrderIds: t.entryOrderIds,
+        error: t.error,
+      })
+    );
+    return;
+  }
+
   if (parsed.kind === "edit") {
-    const t = book.tasks.get(parsed.id);
+    const t = book.get(parsed.id);
     if (!t) {
       info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
       return;
@@ -740,8 +981,7 @@ export async function runCommand(
     }
 
     const tick = await ex.fetchTicker(symbolCcxt);
-    const working = resolveWorkingType(await getPreset(DEFAULT_PRESET).catch(()=>null));
-    const ref = getRefPrice(tick, working);
+    const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
 
     const open = await ex.fetchOpenOrders(symbolCcxt);
     const openIds = new Set(open.filter((o) => o.id).map((o) => o.id as string));
@@ -756,7 +996,7 @@ export async function runCommand(
         continue;
       }
 
-      let isLimit = (parsed.dir === "l" ? leg.price < ref : leg.price > ref);
+      let isLimit = (parsed.dir === "l" ? leg.price < mark : leg.price > mark);
 
       let replacedId: string | undefined;
       if (i < openEntryIdsOrdered.length) {
@@ -766,7 +1006,7 @@ export async function runCommand(
 
       let newId: string | undefined;
       try {
-        if (!isLimit && wouldStopImmediatelyTrigger(parsed.dir === "l" ? "long" : "short", leg.price, ref)) {
+        if (!isLimit && wouldStopImmediatelyTrigger(parsed.dir === "l" ? "long" : "short", leg.price, mark)) {
           isLimit = true;
         }
         if (isLimit) {
@@ -775,7 +1015,7 @@ export async function runCommand(
           newId = o.id!;
         } else {
           const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx, working);
+          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx);
           newId = o.id!;
         }
       } catch {
@@ -810,28 +1050,140 @@ export async function runCommand(
   // --- торговля ---
   if (parsed.kind !== "trade") return;
 
-  const { dir, rawTicker, legs, presetName, dryRun } = parsed;
+  const { dir, rawTicker, legs, presetName, dryRun, market } = parsed;
   const side = dir === "l" ? "long" : "short";
   const sideEntry = side === "long" ? "buy" : "sell";
   const sideExit = side === "long" ? "sell" : "buy";
 
   const preset = await getPreset(presetName);
-  const working = resolveWorkingType(preset);
-  const stopTicks = resolveStopTicks(preset);
-
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   ex.loadMarkets && (await ex.loadMarkets().catch(() => {}));
   ex.market(symbolCcxt);
 
   const t0 = await ex.fetchTicker(symbolCcxt);
-  const ref0 = getRefPrice(t0, working);
-  if (!ref0 || !(ref0 > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
+  let markPrice = Number(t0.last ?? t0.mark ?? t0.info?.markPrice);
+  if (!markPrice || !(markPrice > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
 
+  if (market && market.usd > 0) {
+    // ===== МГНОВЕННЫЙ ВХОД ПО РЫНКУ =====
+    const pick = computeQtyForUsdSmart(ex, symbolCcxt, market.usd, markPrice);
+    if (dryRun) {
+      info(formatPreview(mode, {
+        symbol: symbolCcxt,
+        side,
+        notional: market.usd,
+        approxQty: Number(pick.qty.toFixed(5)),
+        now: markPrice,
+        entry: markPrice,
+        isLimit: false,
+        sl: "-",
+        tps: [],
+      }));
+      info("💤 [DRY] Только превью. Заявки не выставляю.");
+      return;
+    }
+
+    await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
+    info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
+
+    // создаём «виртуальную» задачу для пост-обработки (SL/TP) без entry ордеров
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName });
+    book.setEntryOrders(task, [] as string[]);
+
+    // фон — такая же логика как и раньше: при увеличении позиции проставляем SL/TP
+    book.set(task, "waiting_fill");
+    (async () => {
+      try {
+        const keep = new Set<string>(); // нет входных
+        let lastSize = 0;
+        let lastAvg = 0;
+        let tpsPlaced = false;
+
+        for (;;) {
+          const tick = await ex.fetchTicker(symbolCcxt);
+          const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
+
+          const positions = await ex.fetchAllOpenPositions();
+          const my = positions.find((p) => p.symbol === symbolCcxt);
+          const posSize = Math.abs(my?.contracts ?? 0);
+          const entryAvg = Number(my?.entryPrice ?? 0) || 0;
+
+          const delta = posSize - lastSize;
+          const increased = delta > 1e-9;
+
+          if (increased && posSize > 0) {
+            const filters = ex.getSymbolFilters(symbolCcxt);
+            const positionUsd = posSize * entryAvg;
+
+            // пропорциональный риск
+            const totalUsd = task.totalUsd ?? positionUsd;
+            const effectiveRiskUsd = preset.trade_risk * Math.min(1, positionUsd / Math.max(1, totalUsd));
+            const riskPct = Math.max(0, Math.min(1, effectiveRiskUsd / Math.max(1e-12, positionUsd)));
+            const stopRaw = side === "long" ? entryAvg * (1 - riskPct) : entryAvg * (1 + riskPct);
+
+            await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
+            const desiredSL = Number(ex.priceToPrecision(symbolCcxt, stopRaw));
+            const safeSL = adjustStopForMark(side, desiredSL, mark, filters.tickSize || 0.0001);
+            await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+
+            if (!tpsPlaced) {
+              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+              let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
+              tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+              tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+              for (let i = 0; i < re.tpPrices.length; i++) {
+                const q = tpQtys[i];
+                if (q <= 0) continue;
+                const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+              }
+              tpsPlaced = true;
+
+              info(formatPlan(mode, {
+                entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
+                tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
+              }));
+            }
+
+            lastSize = posSize;
+            lastAvg = entryAvg;
+            book.set(task, "live");
+          }
+
+          // условие завершения — позиция закрыта и нет открытых ордеров
+          const open = await ex.fetchOpenOrders(symbolCcxt);
+          const nonEntryOpen = open; // keep пуст
+          if (Math.abs(await ex.fetchPositionSize(symbolCcxt)) < 1e-12 && nonEntryOpen.length === 0) {
+            // удаляем таску целиком
+            book.remove(task.id);
+            break;
+          }
+
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      } catch (err: any) {
+        const t = book.get(task.id);
+        if (t) book.set(t, "error", err?.message ?? err);
+        info(`❌ [ERROR] ${err?.message ?? err}`);
+      }
+    })();
+
+    return;
+  }
+
+  // ======= LIMIT/STOP МНОГОНОЖЕВАЯ ЛОГИКА =======
   const totalUsd = legs.reduce((a, l) => a + l.usd, 0);
   const first = legs[0];
 
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
   const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset });
+
+  // RISK-SHARE превью
+  const previewRiskUsd = preset.trade_risk * (first.usd / Math.max(1, totalUsd));
+  const previewRiskPct = Math.max(0, Math.min(1, previewRiskUsd / Math.max(1e-12, first.usd)));
+  const rawSLpreview = side === "long" ? first.price * (1 - previewRiskPct) : first.price * (1 + previewRiskPct);
+  const slPreviewPx = Number(ex.priceToPrecision(symbolCcxt, rawSLpreview));
 
   info(
     formatPreview(mode, {
@@ -839,10 +1191,10 @@ export async function runCommand(
       side,
       notional: totalUsd,
       approxQty: Number(firstPick.qty.toFixed(5)),
-      now: ref0,
+      now: markPrice,
       entry: first.price,
-      isLimit: side === "long" ? first.price < ref0 : first.price > ref0,
-      sl: String(ex.priceToPrecision(symbolCcxt, firstPlan.stopPrice)),
+      isLimit: side === "long" ? first.price < markPrice : first.price > markPrice,
+      sl: String(slPreviewPx),
       tps: firstPlan.tpPrices.map((p, i) => ({
         price: String(ex.priceToPrecision(symbolCcxt, p)),
         R: preset.take_profit[i],
@@ -870,32 +1222,36 @@ export async function runCommand(
       continue;
     }
 
-    const isLimitLeg = side === "long" ? leg.price < ref0 : leg.price > ref0;
+    const isLimitLeg = side === "long" ? leg.price < markPrice : leg.price > markPrice;
     try {
       if (isLimitLeg) {
         const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
+        const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
         entryIds.push(o.id!);
       } else {
         const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        if (wouldStopImmediatelyTrigger(side, stopPx, ref0)) {
+        if (wouldStopImmediatelyTrigger(side, stopPx, markPrice)) {
           const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
+          const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
           entryIds.push(o.id!);
         } else {
-          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx, working);
+          const o = await ex.createStopMarketEntry(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, stopPx);
           entryIds.push(o.id!);
         }
       }
       info(`➕ Вход: ~${(pick.qty).toFixed(5)} @ ${leg.price} (≈ $${pick.usdActual.toFixed(2)} к цели $${leg.usd.toFixed(2)})`);
     } catch {
       const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-      const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
+      const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
       entryIds.push(o.id!);
     }
   }
 
-  const task = book.add(symbolCcxt, `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`);
+  const task = book.add(
+    symbolCcxt,
+    `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
+    { side, totalUsd, presetName }
+  );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);
 
@@ -910,17 +1266,18 @@ export async function runCommand(
       let tpsPlaced = false;
 
       for (;;) {
-        if (book.isCancelRequested(task.id)) {
+        if (book.get(task.id)?.cancelRequested) {
           await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
           for (const id of keep) {
-            await ex.cancelOrder(symbolCcxt, id).catch(() => {});
+            await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
           }
-          book.set(task, "canceled");
+          // Полное удаление
+          book.remove(task.id);
           return;
         }
 
         const tick = await ex.fetchTicker(symbolCcxt);
-        const ref = getRefPrice(tick, working);
+        const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
 
         const positions = await ex.fetchAllOpenPositions();
         const my = positions.find((p) => p.symbol === symbolCcxt);
@@ -930,6 +1287,28 @@ export async function runCommand(
         const open = await ex.fetchOpenOrders(symbolCcxt);
         const entriesLeft = open.filter((o) => o.id && keep.has(o.id)).length;
 
+        // НОВОЕ: если какой-то входной ордер был снят вручную — отменяем всю задачу
+        for (const id of [...keep]) {
+          if (!open.find((o) => o.id === id)) {
+            // этот id исчез — значит снят вручную/исполнен; если снят и позиция не выросла, считаем снят вручную
+            const before = lastSize;
+            const after = posSize;
+            const increased = after > before + 1e-9;
+            if (!increased) {
+              // считаем, что снят руками — снимаем остальные входы и убираем таску
+              try {
+                for (const k of keep) { try { await ex.cancelOrder(symbolCcxt, k); } catch {} }
+                await cancelBracketOnly(ex, symbolCcxt, new Set()); // снести возможные SL/TP
+              } catch {}
+              book.remove(task.id);
+              info(mode === "console"
+                ? `🧹 Отложка #${id} снята вручную — задачу удалил.`
+                : `<b>🧹 Отложка снята вручную</b> (<code>${id}</code>) — задачу удалил.`);
+              return;
+            }
+          }
+        }
+
         const delta = posSize - lastSize;
         const increased = delta > 1e-9; // добор
         const decreased = delta < -1e-9;
@@ -937,17 +1316,24 @@ export async function runCommand(
         if (posSize > 0 && increased) {
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
-          const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
 
-          // SL пересчитываем при доборе
+          // пропорциональный риск к сумме legs
+          const totalPlannedUsd = task.totalUsd ?? positionUsd;
+          const effectiveRiskUsd = (await getPreset(task.presetName || DEFAULT_PRESET)).trade_risk
+            * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+          const riskPct = Math.max(0, Math.min(1, effectiveRiskUsd / Math.max(1e-12, positionUsd)));
+          const stopRaw = side === "long" ? entryAvg * (1 - riskPct) : entryAvg * (1 + riskPct);
+
           await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-          const desiredSL = Number(ex.priceToPrecision(symbolCcxt, re.stopPrice));
-          const safeSL = adjustStopForRef(side, desiredSL, ref, filters.tickSize || 0.0001, stopTicks);
+          const desiredSL = Number(ex.priceToPrecision(symbolCcxt, stopRaw));
+          const safeSL = adjustStopForMark(side, desiredSL, mark, filters.tickSize || 0.0001);
           const sideExit2 = side === "long" ? "sell" : "buy";
-          await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL, working);
+          await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
 
-          // TP ставим только один раз — когда все входы исполнены
           if (entriesLeft === 0 && !tpsPlaced) {
+            const preset = await getPreset(task.presetName || DEFAULT_PRESET);
+            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+
             let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
             tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -960,21 +1346,30 @@ export async function runCommand(
             tpsPlaced = true;
           }
 
+          const presetCur = await getPreset(task.presetName || DEFAULT_PRESET);
+          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetCur });
+
           info(
             formatPlan(mode, {
               entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
               sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
-              tps: re.tpPrices.map((p, i) => ({
+              tps: re2.tpPrices.map((p, i) => ({
                 price: String(ex.priceToPrecision(symbolCcxt, p)),
                 qty: 0,
-                R: preset.take_profit[i],
+                R: presetCur.take_profit[i],
               })),
             })
           );
 
           lastSize = posSize;
           lastAvg = entryAvg;
-          book.set(task, entriesLeft === 0 ? "live" : lastSize > 0 ? "filled" : "waiting_fill");
+          if (entriesLeft === 0) {
+            const tt = book.get(task.id);
+            if (tt) book.set(tt, "live");
+          } else {
+            const tt = book.get(task.id);
+            if (tt) book.set(tt, lastSize > 0 ? "filled" : "waiting_fill");
+          }
         }
 
         if (decreased) {
@@ -984,8 +1379,8 @@ export async function runCommand(
 
         const nonEntryOpen = open.filter((o) => !(o.id && keep.has(o.id)));
         if (posSize < 1e-12 && keep.size === 0 && nonEntryOpen.length === 0) {
-          book.set(task, "flat");
-          book.set(task, "done");
+          // Готово — удаляем таску целиком
+          book.remove(task.id);
           break;
         }
 
@@ -993,16 +1388,19 @@ export async function runCommand(
           if (!open.find((o) => o.id === id)) keep.delete(id);
         }
 
-        await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     } catch (err: any) {
-      book.set(task, "error", err?.message ?? err);
+      const t = book.get(task.id);
+      if (t) {
+        t.error = err?.message ?? err;
+        t.updatedAt = new Date();
+      }
       info(`❌ [ERROR] ${err?.message ?? err}`);
     }
   })();
 
   info(
-    `🚀 Триггер: ${working === "MARK_PRICE" ? "MARK" : "CONTRACT"} • SL-отступ: ${stopTicks} тик(а). ` +
-    `SL пересчитывается только при доборе. TP — один раз после финального добора.`
+    "🚀 Входы подбираются к целевому notional по ближайшему шагу. SL пропорционален заполненной доле; TP — один раз после финального добора. Задачи сохраняются в data/tasks.json."
   );
 }

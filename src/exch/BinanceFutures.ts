@@ -25,11 +25,16 @@ function isTimeoutOrUnknown(e: any): boolean {
   const binanceMsg = String(e?.body || e?.details || e?.name || "");
   const ccxtName = String(e?.constructor?.name || "");
 
-  // Binance -1007, ccxt RequestTimeout/NetworkError, fetch timed out, execution status unknown
-  if (code === -1007) return true;
+  // ✅ ДОБАВЛЕНО: -1000 Unknown error считаем временным и ретраим
+  if (code === -1000) return true;
+
+  if (code === -1007) return true; // execution status unknown
   if (/execution status unknown/i.test(msg + binanceMsg + desc)) return true;
   if (/timed out|timeout|ETIMEDOUT|ESOCKETTIMEDOUT|network error/i.test(msg + desc + binanceMsg)) return true;
   if (/RequestTimeout|NetworkError/i.test(ccxtName)) return true;
+
+  // ✅ ДОБАВЛЕНО: разные формулировки "unknown error" от Binance
+  if (/unknown error/i.test(msg + binanceMsg + desc)) return true;
 
   return false;
 }
@@ -41,33 +46,34 @@ function rid(prefix: string) {
   return `${prefix}_${ts}_${rand}`;
 }
 
-// тип рабочего триггера для стопов/стоп-входов
-export type WorkingType = "MARK_PRICE" | "CONTRACT_PRICE";
-function envWorkingType(): WorkingType {
-  const w = String(process.env.WORKING_TYPE || "contract").toLowerCase();
-  if (w === "mark") return "MARK_PRICE";
-  // default и "contract" → CONTRACT_PRICE (быстрее срабатывание)
-  return "CONTRACT_PRICE";
-}
-
 export class BinanceFutures {
   private fapi: ccxt.binanceusdm;
   private sapi?: ccxt.binance; // spot client (лениво)
   private apiKey?: string;
   private secret?: string;
 
+  // ====== ДОБАВЛЕНО: поля для авто-синхронизации времени ======
+  private timeSkewMs = 0;
+  private lastSyncTs = 0;
+  private SYNC_TTL = 30_000; // обновлять смещение раз в 30 сек
+
   constructor(opts?: { apiKey?: string; secret?: string; enableRateLimit?: boolean }) {
     // допускаем отсутствие opts: возьмём из env
     this.apiKey = opts?.apiKey ?? readEnv("BINANCE_API_KEY", "BINANCE_KEY");
     this.secret = opts?.secret ?? readEnv("BINANCE_API_SECRET", "BINANCE_SECRET");
 
-    const timeout = Number(readEnv("BINANCE_HTTP_TIMEOUT") || 0);
     this.fapi = new ccxt.binanceusdm({
       apiKey: this.apiKey,
       secret: this.secret,
       enableRateLimit: opts?.enableRateLimit ?? true,
-      options: { defaultType: "future" },
-      ...(timeout > 0 ? { timeout } : {}),
+      timeout: 20_000,
+      // recvWindow можно задавать и тут, и в options
+      recvWindow: Number(process.env.BINANCE_RECV_WINDOW || 60_000),
+      options: {
+        defaultType: "future",
+        adjustForTimeDifference: true, // пускай ccxt тоже помогает
+        recvWindow: Number(process.env.BINANCE_RECV_WINDOW || 60_000),
+      },
     } as any);
   }
 
@@ -87,10 +93,35 @@ export class BinanceFutures {
         apiKey: this.apiKey,
         secret: this.secret,
         enableRateLimit: true,
-        options: { defaultType: "spot" },
+        timeout: 20_000,
+        recvWindow: Number(process.env.BINANCE_RECV_WINDOW || 60_000),
+        options: {
+          defaultType: "spot",
+          recvWindow: Number(process.env.BINANCE_RECV_WINDOW || 60_000),
+          adjustForTimeDifference: true, // ✅ добавлено для спота тоже
+        },
       } as any);
     }
     return this.sapi!;
+  }
+
+  // ====== ДОБАВЛЕНО: жёсткая синхронизация со временем Binance ======
+  private async syncServerTime(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastSyncTs < this.SYNC_TTL) return;
+
+    // ccxt raw endpoint: /fapi/v1/time
+    const server = await (this.fapi as any).fapiPublicGetTime();
+    const serverTs = Number(server?.serverTime ?? 0);
+    const localTs = Date.now();
+
+    if (Number.isFinite(serverTs) && serverTs > 0) {
+      // положительное — локальные часы спешат
+      this.timeSkewMs = localTs - serverTs;
+      // ccxt binance читает difference из этого поля
+      (this.fapi as any).timeDifference = -this.timeSkewMs;
+    }
+    this.lastSyncTs = now;
   }
 
   // ====== универсальный ретрай-обёртка ======
@@ -105,10 +136,22 @@ export class BinanceFutures {
     let lastErr: any;
     for (let i = 0; i < tries; i++) {
       try {
+        // ДОБАВЛЕНО: перед вызовом — актуализируем смещение по TTL
+        await this.syncServerTime(false);
         return await op();
       } catch (e: any) {
         lastErr = e;
-        if (!isTimeoutOrUnknown(e) || i === tries - 1) break;
+
+        // ДОБАВЛЕНО: спец-обработка -1021 (Timestamp ahead/behind)
+        const code = Number(e?.code ?? e?.errno ?? 0);
+        const msg = String(e?.message || e);
+        if (code === -1021 || /Timestamp .* (ahead|behind)/i.test(msg)) {
+          try { await this.syncServerTime(true); } catch {}
+          // немедленно повторим попытку (не расходуя сильно backoff)
+          try { return await op(); } catch (ee) { lastErr = ee; }
+        }
+
+        if (!isTimeoutOrUnknown(lastErr) || i === tries - 1) break;
         const backoff = Math.min(maxD, base * Math.pow(1.7, i)) + Math.random() * 180;
         await sleep(backoff);
       }
@@ -210,17 +253,21 @@ export class BinanceFutures {
 
   async fetchOpenOrders(symbol: string) {
     this.ensureKeysOrThrow();
-    return this.withRetry(() => this.fapi.fetchOpenOrders(symbol));
+    // прокинем recvWindow для надёжности
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    return this.withRetry(() => this.fapi.fetchOpenOrders(symbol, undefined, undefined, { recvWindow }));
   }
 
   async cancelOrder(symbol: string, id: string) {
     this.ensureKeysOrThrow();
-    return this.withRetry(() => this.fapi.cancelOrder(id, symbol));
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    return this.withRetry(() => this.fapi.cancelOrder(id, symbol, { recvWindow }));
   }
 
   async cancelAllOrders(symbol: string) {
     this.ensureKeysOrThrow();
-    return this.withRetry(() => this.fapi.cancelAllOrders(symbol));
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    return this.withRetry(() => this.fapi.cancelAllOrders(symbol, { recvWindow }));
   }
 
   // ====== Вспомогательное: поиск ордера по clientOrderId ======
@@ -238,10 +285,12 @@ export class BinanceFutures {
   async createLimit(symbol: string, side: "buy"|"sell", amount: number, price: number) {
     this.ensureKeysOrThrow();
     const clientOrderId = rid("L");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const place = async () => this.fapi.createOrder(symbol, "limit", side, amount, price, {
       reduceOnly: false,
       timeInForce: "GTC",
       newClientOrderId: clientOrderId,
+      recvWindow,
     });
     try {
       return await this.withRetry(place);
@@ -255,22 +304,17 @@ export class BinanceFutures {
   }
 
   // ✅ STOP-MARKET ВХОД (срабатываем по stopPrice, исполняем по рынку)
-  async createStopMarketEntry(
-    symbol: string,
-    side: "buy"|"sell",
-    amount: number,
-    stopPrice: number,
-    workingType?: WorkingType // MARK_PRICE | CONTRACT_PRICE (если не указать — берём из ENV)
-  ) {
+  async createStopMarketEntry(symbol: string, side: "buy"|"sell", amount: number, stopPrice: number) {
     this.ensureKeysOrThrow();
-    const wt: WorkingType = workingType ?? envWorkingType();
     const clientOrderId = rid("SME");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const place = async () => this.fapi.createOrder(symbol, "market", side, amount, undefined, {
       type: "STOP_MARKET",
       stopPrice,
-      workingType: wt,
+      workingType: "MARK_PRICE",
       reduceOnly: false,
       newClientOrderId: clientOrderId,
+      recvWindow,
     });
     try {
       return await this.withRetry(place);
@@ -283,22 +327,44 @@ export class BinanceFutures {
     }
   }
 
-  // ✅ STOP-MARKET СТОП-ЛОСС (закрытие всей позиции) — БЕЗ reduceOnly!
-  async createStopMarketClose(
-    symbol: string,
-    side: "buy"|"sell",
-    stopPrice: number,
-    workingType?: WorkingType // MARK_PRICE | CONTRACT_PRICE (если не указать — берём из ENV)
-  ) {
+  // ✅ MARKET ВХОД (мгновенный)
+  async createMarketEntry(symbol: string, side: "buy"|"sell", amount: number) {
     this.ensureKeysOrThrow();
-    const wt: WorkingType = workingType ?? envWorkingType();
+    const clientOrderId = rid("ME");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    const place = async () => this.fapi.createOrder(symbol, "market", side, amount, undefined, {
+      reduceOnly: false,
+      newClientOrderId: clientOrderId,
+      recvWindow,
+    });
+    try {
+      return await this.withRetry(place);
+    } catch (e: any) {
+      if (isTimeoutOrUnknown(e)) {
+        // при unknown проверяем позицию — если увеличилась, считаем что исполнилось
+        const before = Math.abs(await this.fetchPositionSize(symbol));
+        const exists = await this.findOpenByClientId(symbol, clientOrderId);
+        const after = Math.abs(await this.fetchPositionSize(symbol));
+        if (exists || after > before) {
+          return { id: "unknown-but-applied", info: { newClientOrderId: clientOrderId } } as any;
+        }
+      }
+      throw e;
+    }
+  }
+
+  // ✅ STOP-MARKET СТОП-ЛОСС (закрытие всей позиции) — БЕЗ reduceOnly!
+  async createStopMarketClose(symbol: string, side: "buy"|"sell", stopPrice: number) {
+    this.ensureKeysOrThrow();
     const clientOrderId = rid("SLC");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const place = async () => this.fapi.createOrder(symbol, "market", side, undefined, undefined, {
       type: "STOP_MARKET",
       closePosition: true,
       stopPrice,
-      workingType: wt,
+      workingType: "MARK_PRICE",
       newClientOrderId: clientOrderId,
+      recvWindow,
     });
     try {
       return await this.withRetry(place);
@@ -315,10 +381,12 @@ export class BinanceFutures {
   async createReduceOnlyLimit(symbol: string, side: "buy"|"sell", amount: number, price: number) {
     this.ensureKeysOrThrow();
     const clientOrderId = rid("TP");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const place = async () => this.fapi.createOrder(symbol, "limit", side, amount, price, {
       reduceOnly: true,
       timeInForce: "GTC",
       newClientOrderId: clientOrderId,
+      recvWindow,
     });
     try {
       return await this.withRetry(place);
@@ -335,9 +403,11 @@ export class BinanceFutures {
   async createReduceOnlyMarket(symbol: string, side: "buy"|"sell", amount: number) {
     this.ensureKeysOrThrow();
     const clientOrderId = rid("RO_MKT");
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const place = async () => this.fapi.createOrder(symbol, "market", side, amount, undefined, {
       reduceOnly: true,
       newClientOrderId: clientOrderId,
+      recvWindow,
     });
     try {
       return await this.withRetry(place);
@@ -348,7 +418,6 @@ export class BinanceFutures {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
         const after = Math.abs(await this.fetchPositionSize(symbol));
         if (exists || after < before) {
-          // считаем, что исполнилось
           return { id: "unknown-but-applied", info: { newClientOrderId: clientOrderId } } as any;
         }
       }
