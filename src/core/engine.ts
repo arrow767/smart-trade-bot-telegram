@@ -21,77 +21,22 @@ import {
   formatPreset,
   formatPresetList,
   formatTaskInfo,
-  formatOrders, // NEW
+  formatOrders,
 } from "./format";
 import fs from "fs";
 import path from "path";
+import { 
+  ParsedCmd, 
+  Task, 
+  TradeLeg,
+  TaskStatus, 
+  DEFAULT_PRESET,
+  NOTIONAL_BIAS 
+} from "./types";
 
-// ========== Типы команд/задач ==========
-
-export type TradeLeg = { usd: number; price: number };
-
-export type ParsedCmd =
-  | {
-      kind: "trade";
-      dir: "l" | "s";
-      rawTicker: string;
-      legs: TradeLeg[];          // для LIMIT/STOP
-      presetName: string;
-      dryRun: boolean;
-      market?: { usd: number } | null; // НОВОЕ: если задано — вход по рынку (без цен)
-    }
-  | { kind: "help" }
-  | { kind: "tasks" }
-  | { kind: "positions" }
-  | { kind: "deposit" }
-  | { kind: "exit" }
-  | { kind: "cancel"; id: number }
-  | { kind: "cancel_all" }
-  | { kind: "close"; symbol: string; percent: number }
-  | { kind: "edit"; id: number; dir: "l" | "s"; rawTicker: string; legs: TradeLeg[] }
-  // управление пресетами:
-  | { kind: "preset_list" }
-  | { kind: "preset_show"; name: string }
-  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean }
-  | { kind: "preset_delete"; name: string }
-  // инфо по таске
-  | { kind: "task_info"; id: number }
-  // НОВОЕ: ордера
-  | { kind: "orders"; symbol?: string }
-  | { kind: "cancel_order"; id: string }
-  | { kind: "cancel_limit_symbol"; symbol: string }
-  | { kind: "cancel_stop_symbol"; symbol: string }
-  | { kind: "cancel_all_orders"; sub: "all" | "limit" | "stop" };
-
-export type TaskStatus =
-  | "queued"
-  | "waiting_fill"
-  | "filled"
-  | "placing_bracket"
-  | "live"
-  | "flat"
-  | "canceled"
-  | "error"
-  | "done";
-
-export type Task = {
-  id: number;
-  symbolCcxt: string;
-  label: string;
-  status: TaskStatus;
-  error?: string;
-  startedAt: Date;
-  updatedAt: Date;
-  entryOrderIds?: string[];
-  cancelRequested?: boolean;
-  // НОВОЕ: для восстановления и инфо
-  side?: "long" | "short";
-  totalUsd?: number;        // суммарный план по legs / для риска
-  presetName?: string;
-};
-
-export const DEFAULT_PRESET = "4h";
-const NOTIONAL_BIAS: "nearest" | "down" | "up" = "nearest";
+// Реэкспорт для внешних модулей
+export { DEFAULT_PRESET } from "./types";
+export type { ParsedCmd, Task, TradeLeg, TaskStatus } from "./types";
 
 // ======== persist tasks to JSON ========
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -224,7 +169,7 @@ function parseNumsCSV(s?: string): number[] | undefined {
 // --- НОВОЕ: утилиты для ордеров ---
 function isStopOrder(o: any): boolean {
   const t = String(o.type || o.info?.type || "").toUpperCase();
-  return t.includes("STOP"); // STOP, STOP_MARKET, STOP_LOSS_LIMIT, TAKE_PROFIT_* (если есть STOP)
+  return t.includes("STOP"); // STOP, STOP_MARKET, STOP_LOСС_LIMIT, TAKE_PROFIT_* (если есть STOP)
 }
 function isLimitOrder(o: any): boolean {
   const t = String(o.type || o.info?.type || "").toUpperCase();
@@ -344,7 +289,6 @@ export function parseLine(line: string): ParsedCmd | null {
   if (cmd === "cancel-all") return { kind: "cancel_all" };
   if (cmd === "close" && p[1]) {
     const symbol = p[1];
-    // FIXED: anst percent → const percent
     const percent = p[2] ? Math.max(0, Math.min(100, Number(p[2]))) : 100;
     return { kind: "close", symbol, percent: Number.isFinite(percent) ? percent : 100 };
   }
@@ -360,7 +304,6 @@ export function parseLine(line: string): ParsedCmd | null {
   if (["exit", "quit"].includes(cmd)) return { kind: "exit" };
 
   // --- редактирование входов ---
-  // edit <id> <l|s> <sym> <usd1> <price1> [<usd2> <price2> ...]
   if (
     cmd === "edit" &&
     p[1] &&
@@ -391,7 +334,6 @@ export function parseLine(line: string): ParsedCmd | null {
   if (!rawTicker) return null;
 
   // MARKET-вход краткий: l <sym> <usd> [preset]
-  // Если после тикера только один числовой аргумент, дальше — либо конец, либо preset
   if (p.length >= 3 && isFinite(Number(p[2])) && (p.length === 3 || isNaN(Number(p[3])))) {
     const usd = Number(p[2]);
     const presetName = p[3] ? p[3] : DEFAULT_PRESET;
@@ -432,12 +374,10 @@ export function parseLine(line: string): ParsedCmd | null {
 
 // ========== Утилиты торговли ==========
 
-// qty в UI до 5 знаков
 function fmtQty5(q: number): string {
   return (Math.round(q * 1e5) / 1e5).toFixed(5);
 }
 
-// подобрать qty по шагу под целевой notional
 function computeQtyForUsdSmart(
   ex: BinanceFutures,
   symbol: string,
@@ -464,38 +404,21 @@ function computeQtyForUsdSmart(
   const diffFloor = Math.abs(usdFloor - usdTarget);
   const diffCeil = Math.abs(usdCeil - usdTarget);
 
-  let q = qFloor,
-    usdAct = usdFloor;
+  let q = qFloor, usdAct = usdFloor;
   if (bias === "down") {
-    q = qFloor;
-    usdAct = usdFloor;
+    q = qFloor; usdAct = usdFloor;
   } else if (bias === "up") {
-    q = qCeil;
-    usdAct = usdCeil;
+    q = qCeil; usdAct = usdCeil;
   } else {
-    if (diffCeil < diffFloor) {
-      q = qCeil;
-      usdAct = usdCeil;
-    } else if (diffCeil > diffFloor) {
-      q = qFloor;
-      usdAct = usdFloor;
-    } else {
-      q = qFloor;
-      usdAct = usdFloor;
-    }
+    if (diffCeil < diffFloor) { q = qCeil; usdAct = usdCeil; }
+    else { q = qFloor; usdAct = usdFloor; }
   }
 
   q = Number(ex.amountToPrecision(symbol, q));
   if (q < (ex.getSymbolFilters(symbol).minQty || 0) - 1e-12) {
     return { qty: 0, usdActual: 0, under: true, over: false, tooSmall: true };
   }
-  return {
-    qty: q,
-    usdActual: usdAct,
-    under: usdAct <= usdTarget,
-    over: usdAct > usdTarget,
-    tooSmall: false,
-  };
+  return { qty: q, usdActual: usdAct, under: usdAct <= usdTarget, over: usdAct > usdTarget, tooSmall: false };
 }
 
 function wouldStopImmediatelyTrigger(side: "long" | "short", stopPrice: number, mark: number) {
@@ -510,6 +433,18 @@ function adjustStopForMark(side: "long" | "short", desired: number, mark: number
     const safe = mark + 2 * tick;
     return Math.max(desired, safe);
   }
+}
+
+// точный SL в долларах риска
+function calcDesiredSLByRiskUsd(
+  side: "long" | "short",
+  entryAvg: number,
+  posSize: number,
+  effectiveRiskUsd: number
+): number {
+  if (!(entryAvg > 0) || !(posSize > 0) || !(effectiveRiskUsd >= 0)) return entryAvg;
+  const perContractLoss = effectiveRiskUsd / Math.max(1e-12, posSize);
+  return side === "long" ? (entryAvg - perContractLoss) : (entryAvg + perContractLoss);
 }
 
 // снимаем только SL (closePosition/stop), не трогая входы/ТП
@@ -536,7 +471,7 @@ async function cancelBracketOnly(ex: BinanceFutures, symbolCcxt: string, keepIds
   }
 }
 
-// ✅ Частичное/полное закрытие (с обработкой ReduceOnly блокировок)
+// закрытие части
 async function closePositionPercent(
   ex: BinanceFutures,
   symbolCcxt: string,
@@ -553,7 +488,6 @@ async function closePositionPercent(
   const target = Math.max(f.minQty, Number(ex.amountToPrecision(symbolCcxt, steps * f.stepSize)));
   if (!(target > 0)) return { closed: 0, sideExit, fullyClosed: false };
 
-  // Открытые reduce-only лимитки (TP) в сторону выхода
   const open = await ex.fetchOpenOrders(symbolCcxt);
   type OpenRO = { id: string; amount: number; side: string; type: string };
   const roList: OpenRO[] = [];
@@ -572,7 +506,7 @@ async function closePositionPercent(
 
   if (target > freeCapacity + 1e-12) {
     let toCancel = target - freeCapacity;
-    roList.sort((a, b) => a.amount - b.amount); // снимем самых маленьких первыми
+    roList.sort((a, b) => a.amount - b.amount);
     for (const o of roList) {
       if (toCancel <= 0) break;
       try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
@@ -606,27 +540,21 @@ function buildHelp(mode: UIMode): string {
     "  Пример: edit 1 l xrp 200 2.35 100 2.36 100 2.37",
     "",
     "Управление позициями и задачами:",
-    "  close <symbol> [percent]      — закрыть позицию полностью/частично",
-    "  cancel <taskId>               — отменить задачу и удалить её",
-    "  cancel-all                    — отменить все задачи и удалить их",
-    "  info <taskId>                 — подробности по задаче",
-    "  positions | deposit | tasks   — инфо",
+    "  close <symbol> [percent]",
+    "  cancel <taskId>",
+    "  cancel-all",
+    "  info <taskId>",
+    "  positions | deposit | tasks",
     "",
     "Ордеры:",
-    "  orders [symbol]               — показать открытые ордера",
-    "  cancel order <id>             — снять ордер по ID",
-    "  cancel limit <symbol>         — снять все LIMIT по символу",
-    "  cancel stop <symbol>          — снять все STOP по символу",
-    "  cancel-all orders             — снять все ордера (видимые боту)",
-    "  cancel-all limit orders       — снять все LIMIT ордера",
-    "  cancel-all stop orders        — снять все STOP ордера",
+    "  orders [symbol]",
+    "  cancel order <id>",
+    "  cancel limit <symbol>",
+    "  cancel stop <symbol>",
+    "  cancel-all orders / limit orders / stop orders",
     "",
     "Пресеты:",
-    "  preset list",
-    "  preset show <name>",
-    "  preset set <name> risk=<num> tp=<a,b,c> ratio=<a,b,c> [default=1]",
-    "  preset default=<name>",
-    "  preset delete <name>",
+    "  preset list/show/set/default/delete",
   ];
   return lines.join("\n");
 }
@@ -641,7 +569,6 @@ export async function runCommand(
   info: (msg: string) => void,
   mode: UIMode = "console"
 ) {
-  // --- help ---
   if (parsed.kind === "help") {
     info(mode === "console" ? buildHelp(mode) : `<pre>${buildHelp(mode)}</pre>`);
     return;
@@ -684,7 +611,7 @@ export async function runCommand(
     return;
   }
 
-  // --- НОВОЕ: отмена ордера по id (ищем по известным символам) ---
+  // --- отмена ордера по id ---
   if (parsed.kind === "cancel_order") {
     const id = parsed.id;
     const symbols = await collectSymbolsForOrders(ex, book);
@@ -703,7 +630,7 @@ export async function runCommand(
     return;
   }
 
-  // --- НОВОЕ: отмена лимитных/стоп-ордеров по символу ---
+  // --- отмена лимитных/стоп по символу ---
   if (parsed.kind === "cancel_limit_symbol" || parsed.kind === "cancel_stop_symbol") {
     const sym = parsed.symbol;
     try {
@@ -721,7 +648,7 @@ export async function runCommand(
     return;
   }
 
-  // --- НОВОЕ: cancel-all по типам ---
+  // --- cancel-all по типам ---
   if (parsed.kind === "cancel_all_orders") {
     const modeSub = parsed.sub; // all | limit | stop
     const symbols = await collectSymbolsForOrders(ex, book);
@@ -816,10 +743,7 @@ export async function runCommand(
   if (parsed.kind === "deposit") {
     const futures = await ex.fetchFuturesUSDTBalance();
 
-    // spot USDT
-    let spotTotal = 0,
-      spotFree = 0,
-      spotUsed = 0;
+    let spotTotal = 0, spotFree = 0, spotUsed = 0;
     try {
       const spot = await ex.fetchSpotUSDTBalance();
       spotTotal = spot.total;
@@ -833,14 +757,8 @@ export async function runCommand(
 
     info(
       formatDeposit(mode, {
-        total: futures.total,
-        free: futures.free,
-        used: futures.used,
-        unreal,
-        spotTotal,
-        spotFree,
-        spotUsed,
-        grandTotal,
+        total: futures.total, free: futures.free, used: futures.used,
+        unreal, spotTotal, spotFree, spotUsed, grandTotal,
       } as any)
     );
     return;
@@ -849,11 +767,8 @@ export async function runCommand(
   if (parsed.kind === "positions") {
     const listRaw = await ex.fetchAllOpenPositions();
     const list = listRaw.map((p) => ({
-      symbol: p.symbol,
-      side: p.side,
-      qty: p.contracts,
-      avg: p.entryPrice || 0,
-      pnl: Number(p.unrealizedPnlUsd) || 0,
+      symbol: p.symbol, side: p.side, qty: p.contracts,
+      avg: p.entryPrice || 0, pnl: Number(p.unrealizedPnlUsd) || 0,
     }));
     info(formatPositions(mode, list));
     return;
@@ -861,11 +776,8 @@ export async function runCommand(
 
   if (parsed.kind === "tasks") {
     const rows = book.list().map((t) => ({
-      id: t.id,
-      status: t.status,
-      symbol: t.symbolCcxt,
-      label: t.label,
-      created: t.startedAt.toISOString().replace("T", " ").slice(0, 19),
+      id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
+      created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
     }));
     info(formatTasks(mode, rows));
@@ -878,7 +790,6 @@ export async function runCommand(
       info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
       return;
     }
-    // Снимаем все связанные ордера и УДАЛЯЕМ таску из книги
     try {
       const keep = new Set(t.entryOrderIds || []);
       await cancelBracketOnly(ex, t.symbolCcxt, keep).catch(() => {});
@@ -886,7 +797,7 @@ export async function runCommand(
         await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
       }
     } catch {}
-    book.remove(t.id); // НОВОЕ: удаляем полностью
+    book.remove(t.id);
     info(mode === "console" ? `Удалил задачу #${parsed.id}.` : `<b>Удалил задачу #${parsed.id}</b>`);
     return;
   }
@@ -931,7 +842,6 @@ export async function runCommand(
     return;
   }
 
-  // --- редактирование входов ---
   if (parsed.kind === "task_info") {
     const t = book.get(parsed.id);
     if (!t) {
@@ -940,17 +850,11 @@ export async function runCommand(
     }
     info(
       formatTaskInfo(mode, {
-        id: t.id,
-        status: t.status,
-        symbol: t.symbolCcxt,
-        label: t.label,
+        id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
         createdAt: t.startedAt.toISOString().replace("T"," ").slice(0,19),
         updatedAt: t.updatedAt.toISOString().replace("T"," ").slice(0,19),
-        side: t.side,
-        totalUsd: t.totalUsd,
-        presetName: t.presetName,
-        entryOrderIds: t.entryOrderIds,
-        error: t.error,
+        side: t.side, totalUsd: t.totalUsd, presetName: t.presetName,
+        entryOrderIds: t.entryOrderIds, error: t.error,
       })
     );
     return;
@@ -1069,15 +973,8 @@ export async function runCommand(
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, market.usd, markPrice);
     if (dryRun) {
       info(formatPreview(mode, {
-        symbol: symbolCcxt,
-        side,
-        notional: market.usd,
-        approxQty: Number(pick.qty.toFixed(5)),
-        now: markPrice,
-        entry: markPrice,
-        isLimit: false,
-        sl: "-",
-        tps: [],
+        symbol: symbolCcxt, side, notional: market.usd, approxQty: Number(pick.qty.toFixed(5)),
+        now: markPrice, entry: markPrice, isLimit: false, sl: "-", tps: [],
       }));
       info("💤 [DRY] Только превью. Заявки не выставляю.");
       return;
@@ -1086,15 +983,13 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    // создаём «виртуальную» задачу для пост-обработки (SL/TP) без entry ордеров
     const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName });
     book.setEntryOrders(task, [] as string[]);
 
-    // фон — такая же логика как и раньше: при увеличении позиции проставляем SL/TP
     book.set(task, "waiting_fill");
     (async () => {
       try {
-        const keep = new Set<string>(); // нет входных
+        const keep = new Set<string>();
         let lastSize = 0;
         let lastAvg = 0;
         let tpsPlaced = false;
@@ -1115,15 +1010,13 @@ export async function runCommand(
             const filters = ex.getSymbolFilters(symbolCcxt);
             const positionUsd = posSize * entryAvg;
 
-            // пропорциональный риск
             const totalUsd = task.totalUsd ?? positionUsd;
             const effectiveRiskUsd = preset.trade_risk * Math.min(1, positionUsd / Math.max(1, totalUsd));
-            const riskPct = Math.max(0, Math.min(1, effectiveRiskUsd / Math.max(1e-12, positionUsd)));
-            const stopRaw = side === "long" ? entryAvg * (1 - riskPct) : entryAvg * (1 + riskPct);
+
+            const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+            const safeSL = adjustStopForMark(side, Number(ex.priceToPrecision(symbolCcxt, desiredSL)), mark, filters.tickSize || 0.0001);
 
             await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-            const desiredSL = Number(ex.priceToPrecision(symbolCcxt, stopRaw));
-            const safeSL = adjustStopForMark(side, desiredSL, mark, filters.tickSize || 0.0001);
             await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
 
             if (!tpsPlaced) {
@@ -1151,11 +1044,9 @@ export async function runCommand(
             book.set(task, "live");
           }
 
-          // условие завершения — позиция закрыта и нет открытых ордеров
           const open = await ex.fetchOpenOrders(symbolCcxt);
-          const nonEntryOpen = open; // keep пуст
+          const nonEntryOpen = open;
           if (Math.abs(await ex.fetchPositionSize(symbolCcxt)) < 1e-12 && nonEntryOpen.length === 0) {
-            // удаляем таску целиком
             book.remove(task.id);
             break;
           }
@@ -1179,11 +1070,12 @@ export async function runCommand(
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
   const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset });
 
-  // RISK-SHARE превью
   const previewRiskUsd = preset.trade_risk * (first.usd / Math.max(1, totalUsd));
-  const previewRiskPct = Math.max(0, Math.min(1, previewRiskUsd / Math.max(1e-12, first.usd)));
-  const rawSLpreview = side === "long" ? first.price * (1 - previewRiskPct) : first.price * (1 + previewRiskPct);
-  const slPreviewPx = Number(ex.priceToPrecision(symbolCcxt, rawSLpreview));
+  const previewSL =
+    side === "long"
+      ? first.price - previewRiskUsd / Math.max(1e-12, firstPick.qty)
+      : first.price + previewRiskUsd / Math.max(1e-12, firstPick.qty);
+  const slPreviewPx = Number(ex.priceToPrecision(symbolCcxt, previewSL));
 
   info(
     formatPreview(mode, {
@@ -1255,7 +1147,7 @@ export async function runCommand(
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);
 
-  // Фоновый обработчик: SL пересчитываем только при доборе; TP ставим один раз после финального добора
+  // Фоновый обработчик
   book.set(task, "waiting_fill");
 
   (async () => {
@@ -1265,13 +1157,16 @@ export async function runCommand(
       let lastAvg = 0;
       let tpsPlaced = false;
 
+      // НОВОЕ: учёт исчезнувших входов с задержкой-подтверждением
+      const MANUAL_GONE_GRACE_MS = 4000;
+      const gone = new Map<string, { ts: number; sizeOnGone: number }>();
+
       for (;;) {
         if (book.get(task.id)?.cancelRequested) {
           await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
           for (const id of keep) {
-            await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
+            await ex.cancelOrder(task.symbolCcxt, id).catch(() => {});
           }
-          // Полное удаление
           book.remove(task.id);
           return;
         }
@@ -1287,54 +1182,92 @@ export async function runCommand(
         const open = await ex.fetchOpenOrders(symbolCcxt);
         const entriesLeft = open.filter((o) => o.id && keep.has(o.id)).length;
 
-        // НОВОЕ: если какой-то входной ордер был снят вручную — отменяем всю задачу
+        // === Исправлено: надёжное определение «снято вручную» ===
         for (const id of [...keep]) {
-          if (!open.find((o) => o.id === id)) {
-            // этот id исчез — значит снят вручную/исполнен; если снят и позиция не выросла, считаем снят вручную
-            const before = lastSize;
-            const after = posSize;
-            const increased = after > before + 1e-9;
-            if (!increased) {
-              // считаем, что снят руками — снимаем остальные входы и убираем таску
-              try {
-                for (const k of keep) { try { await ex.cancelOrder(symbolCcxt, k); } catch {} }
-                await cancelBracketOnly(ex, symbolCcxt, new Set()); // снести возможные SL/TP
-              } catch {}
-              book.remove(task.id);
-              info(mode === "console"
-                ? `🧹 Отложка #${id} снята вручную — задачу удалил.`
-                : `<b>🧹 Отложка снята вручную</b> (<code>${id}</code>) — задачу удалил.`);
-              return;
-            }
+          const exists = open.some((o) => o.id === id);
+          if (exists) {
+            gone.delete(id);
+            continue;
+          }
+          // не найден среди открытых
+          const rec = gone.get(id);
+          if (!rec) {
+            // помечаем момент исчезновения
+            gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
+            continue;
+          }
+          const elapsed = Date.now() - rec.ts;
+          const increasedSinceGone = posSize > rec.sizeOnGone + 1e-9;
+
+          if (increasedSinceGone) {
+            // считаем, что ордер исполнился (позиция увеличилась)
+            keep.delete(id);
+            gone.delete(id);
+            continue;
+          }
+
+          if (elapsed < MANUAL_GONE_GRACE_MS) {
+            // ждём подтверждения
+            continue;
+          }
+
+          // прошло достаточно времени и позиция не выросла — трактуем как снятый руками
+          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
+
+          if (flat) {
+            // ⚠️ Больше НЕ удаляем задачу немедленно.
+            // Просто вычёркиваем этот вход и даём шансу другим входам этой задачи остаться в силе.
+            keep.delete(id);
+            gone.delete(id);
+            // продолжаем цикл
+          } else {
+            // уже в позиции — ничего не снимаем, только вычёркиваем этот id из keep и продолжаем
+            keep.delete(id);
+            gone.delete(id);
+          }
+        }
+
+        // ✅ НОВЫЙ чек: если мы вне позиции и ВСЕ входные отложки этой задачи сняты — удаляем задачу
+        {
+          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
+          if (flat && keep.size === 0) {
+            // Ничего дополнительно не отменяем, чтобы не конфликтовать с другими задачами по этому же символу
+            book.remove(task.id);
+            info(
+              mode === "console"
+                ? `🧹 Все входные отложенные заявки задачи сняты вручную — задачу удалил.`
+                : `<b>🧹 Все входные отложенные заявки задачи сняты вручную</b> — задачу удалил.`
+            );
+            return;
           }
         }
 
         const delta = posSize - lastSize;
-        const increased = delta > 1e-9; // добор
+        const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
         if (posSize > 0 && increased) {
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
 
-          // пропорциональный риск к сумме legs
           const totalPlannedUsd = task.totalUsd ?? positionUsd;
-          const effectiveRiskUsd = (await getPreset(task.presetName || DEFAULT_PRESET)).trade_risk
-            * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
-          const riskPct = Math.max(0, Math.min(1, effectiveRiskUsd / Math.max(1e-12, positionUsd)));
-          const stopRaw = side === "long" ? entryAvg * (1 - riskPct) : entryAvg * (1 + riskPct);
+          const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
+          const effectiveRiskUsd =
+            presetForRisk.trade_risk * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+
+          const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+          const safeSL = adjustStopForMark(side, Number(ex.priceToPrecision(symbolCcxt, desiredSL)), mark, filters.tickSize || 0.0001);
 
           await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-          const desiredSL = Number(ex.priceToPrecision(symbolCcxt, stopRaw));
-          const safeSL = adjustStopForMark(side, desiredSL, mark, filters.tickSize || 0.0001);
           const sideExit2 = side === "long" ? "sell" : "buy";
           await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
 
           if (entriesLeft === 0 && !tpsPlaced) {
-            const preset = await getPreset(task.presetName || DEFAULT_PRESET);
-            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetForRisk });
 
-            let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
+            let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
             tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
             for (let i = 0; i < re.tpPrices.length; i++) {
@@ -1346,8 +1279,7 @@ export async function runCommand(
             tpsPlaced = true;
           }
 
-          const presetCur = await getPreset(task.presetName || DEFAULT_PRESET);
-          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetCur });
+          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetForRisk });
 
           info(
             formatPlan(mode, {
@@ -1356,7 +1288,7 @@ export async function runCommand(
               tps: re2.tpPrices.map((p, i) => ({
                 price: String(ex.priceToPrecision(symbolCcxt, p)),
                 qty: 0,
-                R: presetCur.take_profit[i],
+                R: presetForRisk.take_profit[i],
               })),
             })
           );
@@ -1379,7 +1311,6 @@ export async function runCommand(
 
         const nonEntryOpen = open.filter((o) => !(o.id && keep.has(o.id)));
         if (posSize < 1e-12 && keep.size === 0 && nonEntryOpen.length === 0) {
-          // Готово — удаляем таску целиком
           book.remove(task.id);
           break;
         }

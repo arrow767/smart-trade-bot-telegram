@@ -3,7 +3,7 @@
   "presets": {
     "4h": {
       "config_name": "4h",
-      "trade_risk": 0.2,
+      "trade_risk": 0.4,
       "take_profit": [
         3,
         5,
