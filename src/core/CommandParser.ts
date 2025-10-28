@@ -1,0 +1,203 @@
+import { ParsedCmd, TradeLeg, DEFAULT_PRESET } from "./types";
+import { normalizeTickerToUsdt } from "./SymbolResolver";
+
+/**
+ * Парсинг строки CSV чисел
+ */
+function parseNumsCSV(s?: string): number[] | undefined {
+  if (!s) return undefined;
+  const parts = s.split(/[,\s]+/).filter(Boolean);
+  const nums = parts.map((x) => Number(x));
+  if (nums.some((n) => !Number.isFinite(n))) return undefined;
+  return nums;
+}
+
+/**
+ * Парсинг командной строки
+ */
+export function parseLine(line: string): ParsedCmd | null {
+  const p = line.trim().split(/\s+/).filter(Boolean);
+  if (p.length === 0) return null;
+
+  // шорткаты цифрами
+  if (p.length === 1 && /^\d$/.test(p[0])) {
+    const d = p[0];
+    if (d === "1") return { kind: "positions" };
+    if (d === "2") return { kind: "deposit" };
+    if (d === "3") return { kind: "tasks" };
+    if (d === "9") return { kind: "help" };
+    if (d === "0") return { kind: "exit" };
+  }
+
+  const cmd = p[0].toLowerCase();
+
+  // --- управление пресетами ---
+  if (cmd === "preset" || cmd === "presets" || cmd === "config") {
+    const sub = (p[1] || "").toLowerCase();
+
+    if (!sub || sub === "list" || sub === "ls") {
+      return { kind: "preset_list" };
+    }
+
+    if (sub === "show") {
+      const name = p[2];
+      if (!name) return null;
+      return { kind: "preset_show", name };
+    }
+
+    if (sub === "delete" || sub === "rm" || sub === "del") {
+      const name = p[2];
+      if (!name) return null;
+      return { kind: "preset_delete", name };
+    }
+
+    // FIXED: "или" → "||"
+    if (sub === "set" || sub === "add") {
+      const name = p[2];
+      if (!name) return null;
+      const kv = new Map<string, string>();
+      for (let i = 3; i < p.length; i++) {
+        const m = p[i].match(/^([a-zA-Z_]+)=(.+)$/);
+        if (m) kv.set(m[1].toLowerCase(), m[2]);
+      }
+      const risk = kv.has("risk") ? Number(kv.get("risk")) : undefined;
+      const tp = parseNumsCSV(kv.get("tp") || kv.get("take_profit"));
+      const ratio = parseNumsCSV(kv.get("ratio") || kv.get("take_profit_ratio"));
+      const makeDefault = kv.get("default") === "1" || kv.get("default") === "true";
+      return { kind: "preset_set", name, risk, tp, ratio, makeDefault };
+    }
+
+    if (sub.startsWith("default")) {
+      const m = p[1].match(/^default=(.+)$/i);
+      const name = m ? m[1] : p[2];
+      if (!name) return null;
+      return { kind: "preset_set", name, makeDefault: true };
+    }
+  }
+
+  // --- инфо по таске ---
+  if (cmd === "info" && p[1]) {
+    const id = Number(p[1]);
+    if (!Number.isFinite(id)) return null;
+    return { kind: "task_info", id };
+  }
+
+  // --- НОВОЕ: ордера / отмена ордеров ---
+  if (cmd === "orders") {
+    const sym = p[1];
+    if (sym) {
+      const { symbolCcxt } = normalizeTickerToUsdt(sym);
+      return { kind: "orders", symbol: symbolCcxt };
+    }
+    return { kind: "orders" };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "order" && p[2]) {
+    return { kind: "cancel_order", id: p[2] };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "limit" && p[2]) {
+    const { symbolCcxt } = normalizeTickerToUsdt(p[2]);
+    return { kind: "cancel_limit_symbol", symbol: symbolCcxt };
+  }
+
+  if (cmd === "cancel" && (p[1]||"").toLowerCase() === "stop" && p[2]) {
+    const { symbolCcxt } = normalizeTickerToUsdt(p[2]);
+    return { kind: "cancel_stop_symbol", symbol: symbolCcxt };
+  }
+
+  if (cmd === "cancel-all") {
+    const sub1 = (p[1]||"").toLowerCase();
+    const sub2 = (p[2]||"").toLowerCase();
+    if (sub1 === "orders" && !sub2) return { kind: "cancel_all_orders", sub: "all" };
+    if (sub1 === "limit" && sub2 === "orders") return { kind: "cancel_all_orders", sub: "limit" };
+    if (sub1 === "stop" && sub2 === "orders") return { kind: "cancel_all_orders", sub: "stop" };
+  }
+
+  // --- стандартные команды ---
+  if (cmd === "cancel" && p[1]) return { kind: "cancel", id: Number(p[1]) };
+  if (cmd === "cancel-all") return { kind: "cancel_all" };
+  if (cmd === "close" && p[1]) {
+    const symbol = p[1];
+    const percent = p[2] ? Math.max(0, Math.min(100, Number(p[2]))) : 100;
+    return { kind: "close", symbol, percent: Number.isFinite(percent) ? percent : 100 };
+  }
+  if (["help", "?"].includes(cmd)) return { kind: "help" };
+  if (["tasks"].includes(cmd)) return { kind: "tasks" };
+  if (["positions", "pos", "open", "мои", "мои-позиции", "мои_позиции"].includes(cmd))
+    return { kind: "positions" };
+  if (
+    ["deposit", "депозит", "баланс"].includes(cmd) ||
+    (p[0].toLowerCase() === "my" && (p[1] ?? "").toLowerCase() === "deposit")
+  )
+    return { kind: "deposit" };
+  if (["exit", "quit"].includes(cmd)) return { kind: "exit" };
+
+  // --- редактирование входов ---
+  if (
+    cmd === "edit" &&
+    p[1] &&
+    ["l", "s"].includes((p[2] ?? "").toLowerCase()) &&
+    p[3] &&
+    p[4] &&
+    p[5]
+  ) {
+    const id = Number(p[1]);
+    const dir = p[2].toLowerCase() as "l" | "s";
+    const rawTicker = p[3];
+    const legs: TradeLeg[] = [];
+    let i = 4;
+    while (i + 1 < p.length && isFinite(Number(p[i])) && isFinite(Number(p[i + 1]))) {
+      const usd = Number(p[i]);
+      const price = Number(p[i + 1]);
+      if (usd > 0 && price > 0) legs.push({ usd, price });
+      i += 2;
+    }
+    if (!Number.isFinite(id) || legs.length === 0) return null;
+    return { kind: "edit", id, dir, rawTicker, legs };
+  }
+
+  // --- торги ---
+  if (!["l", "s"].includes(cmd)) return null;
+
+  const rawTicker = p[1];
+  if (!rawTicker) return null;
+
+  // MARKET-вход краткий: l <sym> <usd> [preset]
+  if (p.length >= 3 && isFinite(Number(p[2])) && (p.length === 3 || isNaN(Number(p[3])))) {
+    const usd = Number(p[2]);
+    const presetName = p[3] ? p[3] : DEFAULT_PRESET;
+    return {
+      kind: "trade",
+      dir: cmd as "l" | "s",
+      rawTicker,
+      legs: [],
+      market: { usd },
+      presetName,
+      dryRun: false,
+    };
+  }
+
+  const legs: TradeLeg[] = [];
+  let i = 2;
+  while (i + 1 < p.length && isFinite(Number(p[i])) && isFinite(Number(p[i + 1]))) {
+    const usd = Number(p[i]);
+    const price = Number(p[i + 1]);
+    if (usd > 0 && price > 0) legs.push({ usd, price });
+    i += 2;
+  }
+  if (legs.length === 0) return null;
+
+  let presetName = DEFAULT_PRESET;
+  let dryRun = false;
+  for (; i < p.length; i++) {
+    const tok = p[i].toLowerCase();
+    if (tok === "--dry") {
+      dryRun = true;
+      continue;
+    }
+    presetName = p[i];
+  }
+
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null };
+}
