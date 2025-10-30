@@ -505,7 +505,12 @@ export async function runCommand(
             const effectiveRiskUsd = preset.trade_risk * Math.min(1, positionUsd / Math.max(1, totalUsd));
 
             const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
-            const safeSL = adjustStopForMark(side, Number(ex.priceToPrecision(symbolCcxt, desiredSL)), mark, filters.tickSize || 0.0001);
+            const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
+            const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
+            const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
+            if (!Number.isFinite(safeSL) || safeSL <= 0) {
+              throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
+            }
 
             await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
             await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
@@ -749,7 +754,12 @@ export async function runCommand(
             presetForRisk.trade_risk * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
 
           const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
-          const safeSL = adjustStopForMark(side, Number(ex.priceToPrecision(symbolCcxt, desiredSL)), mark, filters.tickSize || 0.0001);
+          const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
+          const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
+          const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
+          if (!Number.isFinite(safeSL) || safeSL <= 0) {
+            throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
+          }
 
           await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
           const sideExit2 = side === "long" ? "sell" : "buy";
