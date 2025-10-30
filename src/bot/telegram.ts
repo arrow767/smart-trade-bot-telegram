@@ -40,11 +40,19 @@ const bot = agent ? new Telegraf(token, { telegram: { agent } }) : new Telegraf(
 const ex = new BinanceFutures();
 const book = new TaskBook();
 
+// Inline keyboard (under messages)
 const mainKb = Markup.inlineKeyboard([
   [ Markup.button.callback("📊 Positions", "POS"), Markup.button.callback("💰 Deposit", "DEP") ],
   [ Markup.button.callback("📜 Orders", "ORDERS"), Markup.button.callback("🧰 Tasks", "TASKS") ],
   [ Markup.button.callback("❌ Cancel All", "CANCEL_ALL"), Markup.button.callback("❓ Help", "HELP") ],
 ]);
+
+// Reply keyboard (big buttons near input). Replaces old New trade/Exit set.
+const mainReplyKb = Markup.keyboard([
+  [ "📜 Orders", "📊 Positions" ],
+  [ "💰 Deposit", "🧰 Tasks" ],
+  [ "❓ Help" ],
+]).resize();
 
 // Полный help-текст, идентичный консольному "9"
 function buildHelpText(): string {
@@ -95,7 +103,7 @@ bot.start(async (ctx) => {
       banner("telegram",
         `Готов. Формат: l|s <symbol> <position_usd> <entry> [preset=${DEFAULT_PRESET}]`,
         `Пример: l xrp 500 2.45 4h`),
-      { parse_mode: "HTML", ...mainKb }
+      { parse_mode: "HTML", ...mainKb, ...mainReplyKb }
     );
   } catch (e:any) {
     console.error("start handler error:", e);
@@ -172,6 +180,72 @@ bot.action("ORDERS", async (ctx)=>{
   } catch (e:any) {
     console.error("ORDERS action error:", e);
     try { await ctx.reply(`Ошибка orders: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" }); } catch {}
+  }
+});
+
+// Reply keyboard handlers
+bot.hears("📜 Orders", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await runCommand(ex, book, { kind:"orders" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+  } catch (e:any) {
+    console.error("hears Orders error:", e);
+  }
+});
+
+bot.hears("📊 Positions", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    const list = await ex.fetchAllOpenPositions();
+    if (!list.length) return ctx.reply(`<b>Открытых позиций нет.</b>`, { parse_mode:"HTML" });
+    for (const p of list) {
+      const sym = p.symbol.replace("/USDT:USDT","\").toLowerCase();
+      const kb = Markup.inlineKeyboard([
+        [ Markup.button.callback("Close 25%", `CLOSE|${sym}|25`), Markup.button.callback("Close 50%", `CLOSE|${sym}|50`), Markup.button.callback("Close 100%", `CLOSE|${sym}|100`) ]
+      ]);
+      await ctx.reply(
+        `<b>${p.symbol}</b>\nside: ${p.side.toUpperCase()}  qty=${p.contracts}  avg=${p.entryPrice}\nPnL: ${(Number(p.unrealizedPnlUsd)||0).toFixed(2)}$`,
+        { parse_mode:"HTML", ...kb }
+      );
+    }
+  } catch (e:any) {
+    console.error("hears Positions error:", e);
+  }
+});
+
+bot.hears("💰 Deposit", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await runCommand(ex, book, {kind:"deposit"}, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+  } catch (e:any) {
+    console.error("hears Deposit error:", e);
+  }
+});
+
+bot.hears("🧰 Tasks", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery?.();
+    const rows = book.list();
+    if (!rows.length) return ctx.reply(`Нет активных задач.`, { parse_mode:"HTML" });
+    for (const t of rows) {
+      const kb = Markup.inlineKeyboard([ [ Markup.button.callback(`Cancel #${t.id}`, `CANCEL|${t.id}`) ] ]);
+      const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
+      await ctx.reply(`<b>#${t.id}</b> [${t.status}] ${t.symbolCcxt}\n${t.label}\n${created}${t.error?`\nERR: ${escapeHtml(String(t.error))}`:""}`,
+        { parse_mode:"HTML", ...kb });
+    }
+  } catch (e:any) {
+    console.error("hears Tasks error:", e);
+  }
+});
+
+bot.hears("❓ Help", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
+    await ctx.reply(help, { parse_mode:"HTML" });
+  } catch (e:any) {
+    console.error("hears Help error:", e);
   }
 });
 
