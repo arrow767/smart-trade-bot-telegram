@@ -605,10 +605,10 @@ export async function runCommand(
   const first = legs[0];
 
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
+  const baseRiskPreview = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
   const planningPresetPreview = { ...preset, trade_risk: baseRiskPreview } as any;
   const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset: planningPresetPreview });
 
-  const baseRiskPreview = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
   const previewRiskUsd = baseRiskPreview * (first.usd / Math.max(1, totalUsd));
   const previewSL =
     side === "long"
