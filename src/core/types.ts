@@ -11,6 +11,7 @@ export type ParsedCmd =
       presetName: string;
       dryRun: boolean;
       market?: { usd: number } | null;
+      riskUsdOverride?: number;
     }
   | { kind: "help" }
   | { kind: "tasks" }

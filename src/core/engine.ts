@@ -474,7 +474,7 @@ export async function runCommand(
   // --- торговля ---
   if (parsed.kind !== "trade") return;
 
-  const { dir, rawTicker, legs, presetName, dryRun, market } = parsed;
+  const { dir, rawTicker, legs, presetName, dryRun, market, riskUsdOverride } = parsed as any;
   const side = dir === "l" ? "long" : "short";
   const sideEntry = side === "long" ? "buy" : "sell";
   const sideExit = side === "long" ? "sell" : "buy";
@@ -532,7 +532,8 @@ export async function runCommand(
             const positionUsd = posSize * entryAvg;
 
             const totalUsd = task.totalUsd ?? positionUsd;
-            const effectiveRiskUsd = preset.trade_risk * Math.min(1, positionUsd / Math.max(1, totalUsd));
+            const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
+            const effectiveRiskUsd = baseRisk * Math.min(1, positionUsd / Math.max(1, totalUsd));
 
             const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
@@ -605,7 +606,8 @@ export async function runCommand(
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
   const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset });
 
-  const previewRiskUsd = preset.trade_risk * (first.usd / Math.max(1, totalUsd));
+  const baseRiskPreview = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
+  const previewRiskUsd = baseRiskPreview * (first.usd / Math.max(1, totalUsd));
   const previewSL =
     side === "long"
       ? first.price - previewRiskUsd / Math.max(1e-12, firstPick.qty)
@@ -789,8 +791,8 @@ export async function runCommand(
 
           const totalPlannedUsd = task.totalUsd ?? positionUsd;
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
-          const effectiveRiskUsd =
-            presetForRisk.trade_risk * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+          const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk;
+          const effectiveRiskUsd = baseRisk * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
 
           const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
           const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));

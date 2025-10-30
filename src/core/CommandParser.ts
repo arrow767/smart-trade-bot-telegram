@@ -29,7 +29,17 @@ export function parseLine(line: string): ParsedCmd | null {
     if (d === "0") return { kind: "exit" };
   }
 
-  const cmd = p[0].toLowerCase();
+  // Поддержка ручного риска в начале: "50 l xrp ..." или "50$ l ..."
+  let riskOverride: number | undefined;
+  let idx = 0;
+  const first = p[0];
+  const mRisk = first && /^\d+(?:\.\d+)?\$?$/.test(first) ? Number(first.replace(/\$/g, "")) : NaN;
+  if (Number.isFinite(mRisk)) {
+    riskOverride = Number(mRisk);
+    idx = 1;
+  }
+
+  const cmd = (p[idx] || "").toLowerCase();
 
   // --- управление пресетами ---
   if (cmd === "preset" || cmd === "presets" || cmd === "config") {
@@ -117,9 +127,9 @@ export function parseLine(line: string): ParsedCmd | null {
   // --- стандартные команды ---
   if (cmd === "cancel" && p[1]) return { kind: "cancel", id: Number(p[1]) };
   if (cmd === "cancel-all") return { kind: "cancel_all" };
-  if (cmd === "close" && p[1]) {
-    const symbol = p[1];
-    const percent = p[2] ? Math.max(0, Math.min(100, Number(p[2]))) : 100;
+  if (cmd === "close" && p[idx+1]) {
+    const symbol = p[idx+1];
+    const percent = p[idx+2] ? Math.max(0, Math.min(100, Number(p[idx+2]))) : 100;
     return { kind: "close", symbol, percent: Number.isFinite(percent) ? percent : 100 };
   }
   if (["help", "?"].includes(cmd)) return { kind: "help" };
@@ -160,15 +170,13 @@ export function parseLine(line: string): ParsedCmd | null {
   // --- торги ---
   if (!["l", "s"].includes(cmd)) return null;
 
-  const rawTicker = p[1];
+  const rawTicker = p[idx+1];
   if (!rawTicker) return null;
 
   // MARKET-вход краткий: l <sym> <usd> [preset]
-  if (p.length >= 3 && isFinite(Number(p[2])) && (p.length === 3 || isNaN(Number(p[3])))) {
-    const usd = Number(p[2]);
-    let presetName = p[3] ? p[3] : DEFAULT_PRESET;
-    // нормализация пресета вида s4h/l4h → 4h
-    if (presetName && /^[ls]/i.test(presetName)) presetName = presetName.slice(1);
+  if (p.length >= idx+3 && isFinite(Number(p[idx+2])) && (p.length === idx+3 || isNaN(Number(p[idx+3])))) {
+    const usd = Number(p[idx+2]);
+    const presetName = p[idx+3] ? p[idx+3] : DEFAULT_PRESET;
     return {
       kind: "trade",
       dir: cmd as "l" | "s",
@@ -177,11 +185,12 @@ export function parseLine(line: string): ParsedCmd | null {
       market: { usd },
       presetName,
       dryRun: false,
+      riskUsdOverride: riskOverride,
     };
   }
 
   const legs: TradeLeg[] = [];
-  let i = 2;
+  let i = idx+2;
   while (i + 1 < p.length && isFinite(Number(p[i])) && isFinite(Number(p[i + 1]))) {
     const usd = Number(p[i]);
     const price = Number(p[i + 1]);
@@ -198,10 +207,8 @@ export function parseLine(line: string): ParsedCmd | null {
       dryRun = true;
       continue;
     }
-    // нормализация пресета вида s4h/l4h → 4h
     presetName = p[i];
-    if (presetName && /^[ls]/i.test(presetName)) presetName = presetName.slice(1);
   }
 
-  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null };
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null, riskUsdOverride: riskOverride };
 }
