@@ -695,6 +695,7 @@ export async function runCommand(
       let lastSize = 0;
       let lastAvg = 0;
       let tpsPlaced = false;
+      let slPxCurrent: number | undefined;
 
       // НОВОЕ: учёт исчезнувших входов с задержкой-подтверждением
       const MANUAL_GONE_GRACE_MS = 4000;
