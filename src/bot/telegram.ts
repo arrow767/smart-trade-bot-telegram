@@ -196,18 +196,7 @@ bot.hears("📜 Orders", async (ctx)=>{
 bot.hears("📊 Positions", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    const list = await ex.fetchAllOpenPositions();
-    if (!list.length) return ctx.reply(`<b>Открытых позиций нет.</b>`, { parse_mode:"HTML" });
-    for (const p of list) {
-      const sym = p.symbol.replace("/USDT:USDT", "").toLowerCase();
-      const kb = Markup.inlineKeyboard([
-        [ Markup.button.callback("Close 25%", `CLOSE|${sym}|25`), Markup.button.callback("Close 50%", `CLOSE|${sym}|50`), Markup.button.callback("Close 100%", `CLOSE|${sym}|100`) ]
-      ]);
-      await ctx.reply(
-        `<b>${p.symbol}</b>\nside: ${p.side.toUpperCase()}  qty=${p.contracts}  avg=${p.entryPrice}\nPnL: ${(Number(p.unrealizedPnlUsd)||0).toFixed(2)}$`,
-        { parse_mode:"HTML", ...kb }
-      );
-    }
+    await runCommand(ex, book, { kind:"positions" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Positions error:", e);
   }
@@ -225,15 +214,7 @@ bot.hears("💰 Deposit", async (ctx)=>{
 bot.hears("🧰 Tasks", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery?.();
-    const rows = book.list();
-    if (!rows.length) return ctx.reply(`Нет активных задач.`, { parse_mode:"HTML" });
-    for (const t of rows) {
-      const kb = Markup.inlineKeyboard([ [ Markup.button.callback(`Cancel #${t.id}`, `CANCEL|${t.id}`) ] ]);
-      const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
-      await ctx.reply(`<b>#${t.id}</b> [${t.status}] ${t.symbolCcxt}\n${t.label}\n${created}${t.error?`\nERR: ${escapeHtml(String(t.error))}`:""}`,
-        { parse_mode:"HTML", ...kb });
-    }
+    await runCommand(ex, book, { kind:"tasks" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Tasks error:", e);
   }
