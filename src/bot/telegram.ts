@@ -199,7 +199,7 @@ bot.hears("📊 Positions", async (ctx)=>{
     const list = await ex.fetchAllOpenPositions();
     if (!list.length) return ctx.reply(`<b>Открытых позиций нет.</b>`, { parse_mode:"HTML" });
     for (const p of list) {
-      const sym = p.symbol.replace("/USDT:USDT","\").toLowerCase();
+      const sym = p.symbol.replace("/USDT:USDT", "").toLowerCase();
       const kb = Markup.inlineKeyboard([
         [ Markup.button.callback("Close 25%", `CLOSE|${sym}|25`), Markup.button.callback("Close 50%", `CLOSE|${sym}|50`), Markup.button.callback("Close 100%", `CLOSE|${sym}|100`) ]
       ]);
