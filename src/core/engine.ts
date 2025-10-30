@@ -548,7 +548,8 @@ export async function runCommand(
             slPxCurrent = safeSL;
 
             if (!tpsPlaced) {
-              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+              const planningPreset = { ...preset, trade_risk: baseRisk } as any;
+              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
               let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
               tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
               tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -604,7 +605,8 @@ export async function runCommand(
   const first = legs[0];
 
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
-  const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset });
+  const planningPresetPreview = { ...preset, trade_risk: baseRiskPreview } as any;
+  const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset: planningPresetPreview });
 
   const baseRiskPreview = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
   const previewRiskUsd = baseRiskPreview * (first.usd / Math.max(1, totalUsd));
@@ -808,7 +810,8 @@ export async function runCommand(
           slPxCurrent = safeSL;
 
           if (entriesLeft === 0 && !tpsPlaced) {
-            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetForRisk });
+            const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
+            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
 
             let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
@@ -822,7 +825,8 @@ export async function runCommand(
             tpsPlaced = true;
           }
 
-          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetForRisk });
+          const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
+          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset3 });
 
           info(
             formatPlan(mode, {
