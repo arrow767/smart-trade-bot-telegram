@@ -513,6 +513,7 @@ export async function runCommand(
         let lastSize = 0;
         let lastAvg = 0;
         let tpsPlaced = false;
+        let slPxCurrent: number | undefined;
 
         for (;;) {
           const tick = await ex.fetchTicker(symbolCcxt);
@@ -543,6 +544,7 @@ export async function runCommand(
 
             await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
             await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+            slPxCurrent = safeSL;
 
             if (!tpsPlaced) {
               const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
@@ -571,7 +573,15 @@ export async function runCommand(
 
           const open = await ex.fetchOpenOrders(symbolCcxt);
           const nonEntryOpen = open;
-          if (Math.abs(await ex.fetchPositionSize(symbolCcxt)) < 1e-12 && nonEntryOpen.length === 0) {
+          const f = ex.getSymbolFilters(symbolCcxt);
+          const flat = Math.abs(await ex.fetchPositionSize(symbolCcxt)) < Math.max((f.minQty||0)*0.5, 1e-12);
+          if (flat) {
+            // позиция вручную закрыта или сработал SL — чистим ордера и удаляем задачу
+            await ex.cancelAllOrders(symbolCcxt).catch(() => {});
+            const markNow = Number((await ex.fetchTicker(symbolCcxt)).last ?? 0);
+            const wasSL = slPxCurrent && ((side === "long" && markNow <= (slPxCurrent + (f.tickSize||0))) || (side === "short" && markNow >= (slPxCurrent - (f.tickSize||0))));
+            info(mode === "console" ? (wasSL ? `SL сработал по ${symbolCcxt}. Задача удалена.` : `Позиция ${symbolCcxt} закрыта. Задача удалена.`)
+              : (wasSL ? `<b>SL сработал</b> по <code>${symbolCcxt}</code>. Задача удалена.` : `<b>Позиция закрыта</b> по <code>${symbolCcxt}</code>. Задача удалена.`));
             book.remove(task.id);
             break;
           }
@@ -793,6 +803,7 @@ export async function runCommand(
           await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
           const sideExit2 = side === "long" ? "sell" : "buy";
           await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
+          slPxCurrent = safeSL;
 
           if (entriesLeft === 0 && !tpsPlaced) {
             const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: presetForRisk });
@@ -835,6 +846,8 @@ export async function runCommand(
         }
 
         if (decreased) {
+          const closed = -delta;
+          info(mode === "console" ? `TP/выход: -${closed.toFixed(5)} по ${symbolCcxt}` : `<b>TP/выход</b>: −${closed.toFixed(5)} по <code>${symbolCcxt}</code>`);
           lastSize = posSize;
           lastAvg = entryAvg;
         }
