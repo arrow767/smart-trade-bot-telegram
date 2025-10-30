@@ -858,6 +858,29 @@ export async function runCommand(
           lastAvg = entryAvg;
         }
 
+        // Доп. гарантированная постановка TP, если все входные заявки исчезли,
+        // позиция > 0, а TP ещё не поставлены (мог пропасть "increased" триггер)
+        if (!tpsPlaced && entriesLeft === 0 && posSize > 0) {
+          try {
+            const filters = ex.getSymbolFilters(symbolCcxt);
+            const totalPlannedUsd = task.totalUsd ?? posSize * entryAvg;
+            const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
+            const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk;
+            const planningPreset = { ...presetForRisk, trade_risk: baseRisk } as any;
+            const re = planTargets({ side, entryPrice: entryAvg, positionUsd: posSize * entryAvg, preset: planningPreset });
+            let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
+            tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+            tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+            for (let i = 0; i < re.tpPrices.length; i++) {
+              const q = tpQtys[i];
+              if (q <= 0) continue;
+              const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+              await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+            }
+            tpsPlaced = true;
+          } catch {}
+        }
+
         const nonEntryOpen = open.filter((o) => !(o.id && keep.has(o.id)));
         if (posSize < 1e-12 && keep.size === 0 && nonEntryOpen.length === 0) {
           book.remove(task.id);
