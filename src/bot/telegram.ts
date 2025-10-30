@@ -42,7 +42,7 @@ const book = new TaskBook();
 
 const mainKb = Markup.inlineKeyboard([
   [ Markup.button.callback("📊 Positions", "POS"), Markup.button.callback("💰 Deposit", "DEP") ],
-  [ Markup.button.callback("🧰 Tasks", "TASKS") ],
+  [ Markup.button.callback("📜 Orders", "ORDERS"), Markup.button.callback("🧰 Tasks", "TASKS") ],
   [ Markup.button.callback("❌ Cancel All", "CANCEL_ALL"), Markup.button.callback("❓ Help", "HELP") ],
 ]);
 
@@ -161,6 +161,17 @@ bot.action("DEP", async (ctx)=>{
     await runCommand(ex, book, {kind:"deposit"}, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("DEP action error:", e);
+  }
+});
+
+bot.action("ORDERS", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    await runCommand(ex, book, { kind:"orders" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+  } catch (e:any) {
+    console.error("ORDERS action error:", e);
+    try { await ctx.reply(`Ошибка orders: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" }); } catch {}
   }
 });
 
