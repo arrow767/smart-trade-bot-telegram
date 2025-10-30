@@ -118,17 +118,15 @@ export function formatDeposit(
     spotTotal?: number; spotFree?: number; spotUsed?: number; grandTotal?: number;
   }
 ) {
-  const lines = [
-    `total: ${p.total.toFixed(2)}  free: ${p.free.toFixed(2)}  used: ${p.used.toFixed(2)}`,
-    `unrealized: ${fmtPnl(mode, p.unreal)}`,
-  ];
+  // Табличный компактный стиль в Telegram, табличный блок в консоли
+  const futRow = `futures:  total=${p.total.toFixed(2)}  free=${p.free.toFixed(2)}  used=${p.used.toFixed(2)}`;
+  const unrealRow = `unrealized: ${mode === "console" ? fmtPnl(mode, p.unreal) : `${p.unreal >= 0 ? "+" : ""}${p.unreal.toFixed(2)}$`}`;
+  const lines: string[] = [futRow, unrealRow];
   if (typeof p.spotTotal === "number") {
-    lines.push(
-      `spot: total=${(p.spotTotal ?? 0).toFixed(2)}  free=${(p.spotFree ?? 0).toFixed(2)}  used=${(p.spotUsed ?? 0).toFixed(2)}`
-    );
+    lines.push(`spot:     total=${(p.spotTotal ?? 0).toFixed(2)}  free=${(p.spotFree ?? 0).toFixed(2)}  used=${(p.spotUsed ?? 0).toFixed(2)}`);
   }
   if (typeof p.grandTotal === "number") {
-    lines.push(`spot+perp total: ${(p.grandTotal ?? 0).toFixed(2)}`);
+    lines.push(`aggregate: ${(p.grandTotal ?? 0).toFixed(2)}`);
   }
   return mode === "console" ? lineBox(lines, "DEPOSIT (USDT)") : monoBlock(lines.join("\n"));
 }
@@ -414,6 +412,9 @@ export function formatTaskInfo(
     presetName?: string;
     entryOrderIds?: string[];
     error?: string;
+    plannedQty?: number;
+    riskUsd?: number;
+    entryDetails?: Array<{ id: string; type: string; price?: number; stopPrice?: number; qty?: number }>
   }
 ) {
   const lines = [
@@ -425,8 +426,16 @@ export function formatTaskInfo(
     `updated: ${formatTime(p.updatedAt)}`,
     ...(p.side ? [`side: ${p.side}`] : []),
     ...(typeof p.totalUsd === "number" ? [`planned_usd: ${p.totalUsd}`] : []),
+    ...(typeof p.plannedQty === "number" ? [`planned_qty: ${fix3(p.plannedQty)}`] : []),
+    ...(typeof p.riskUsd === "number" ? [`risk_usd: ${p.riskUsd.toFixed(2)}`] : []),
     ...(p.presetName ? [`preset: ${p.presetName}`] : []),
     `entries: ${(p.entryOrderIds||[]).join(", ") || "-"}`,
+    ...(p.entryDetails && p.entryDetails.length
+      ? ["", "entry details:", ...p.entryDetails.map(ed => `  #${ed.id} ${ed.type}` +
+          (ed.qty ? ` q=${fix3(ed.qty)}` : "") +
+          (typeof ed.price === "number" ? ` px=${ed.price}` : "") +
+          (typeof ed.stopPrice === "number" ? ` stop=${ed.stopPrice}` : ""))]
+      : []),
     ...(p.error ? [`error: ${p.error}`] : []),
   ];
   return mode === "console" ? lineBox(lines, "TASK INFO") : monoBlock(lines.join("\n"));

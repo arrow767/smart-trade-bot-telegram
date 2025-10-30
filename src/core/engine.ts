@@ -339,6 +339,32 @@ export async function runCommand(
       info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
       return;
     }
+    let entryDetails: Array<{ id: string; type: string; price?: number; stopPrice?: number; qty?: number }> = [];
+    let plannedQty = 0;
+    try {
+      if (t.entryOrderIds && t.entryOrderIds.length) {
+        const open = await ex.fetchOpenOrders(t.symbolCcxt);
+        for (const o of open) {
+          if (!o.id || !t.entryOrderIds.includes(o.id)) continue;
+          const qty = Number(o.amount ?? o.info?.origQty ?? 0) || undefined;
+          plannedQty += qty || 0;
+          entryDetails.push({
+            id: String(o.id),
+            type: String(o.type || o.info?.type || ""),
+            price: Number(o.price ?? o.info?.price ?? 0) || undefined,
+            stopPrice: Number(o.info?.stopPrice ?? 0) || undefined,
+            qty,
+          });
+        }
+      }
+    } catch {}
+
+    let riskUsd: number | undefined = undefined;
+    try {
+      const presetForRisk = await getPreset(t.presetName || DEFAULT_PRESET);
+      riskUsd = presetForRisk.trade_risk;
+    } catch {}
+
     info(
       formatTaskInfo(mode, {
         id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
@@ -346,6 +372,9 @@ export async function runCommand(
         updatedAt: t.updatedAt.toISOString().replace("T"," ").slice(0,19),
         side: t.side, totalUsd: t.totalUsd, presetName: t.presetName,
         entryOrderIds: t.entryOrderIds, error: t.error,
+        plannedQty: plannedQty || undefined,
+        riskUsd,
+        entryDetails: entryDetails.length ? entryDetails : undefined,
       })
     );
     return;
