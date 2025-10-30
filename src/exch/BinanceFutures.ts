@@ -309,8 +309,7 @@ export class BinanceFutures {
     const clientOrderId = rid("SME");
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase(); // "CONTRACT_PRICE" | "MARK_PRICE"
-    const place = async () => this.fapi.createOrder(symbol, "market", side, amount, undefined, {
-      type: "STOP_MARKET",
+    const place = async () => this.fapi.createOrder(symbol, "STOP_MARKET" as any, side, amount, undefined, {
       stopPrice,
       workingType,          // ⬅️ по умолчанию last/contract price для более быстрого триггера
       priceProtect: false,  // ⬅️ без защиты, чтобы не задерживать триггер
@@ -361,8 +360,7 @@ export class BinanceFutures {
     const clientOrderId = rid("SLC");
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
     const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase();
-    const place = async () => this.fapi.createOrder(symbol, "market", side, undefined, undefined, {
-      type: "STOP_MARKET",
+    const place = async () => this.fapi.createOrder(symbol, "STOP_MARKET" as any, side, undefined, undefined, {
       closePosition: true,
       stopPrice,
       workingType,          // ⬅️ быстрый триггер по last/contract
