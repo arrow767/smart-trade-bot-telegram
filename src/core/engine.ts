@@ -51,6 +51,9 @@ export { DEFAULT_PRESET } from "./types";
 export { TaskBook } from "./TaskBook";
 export { parseLine } from "./CommandParser";
 export type { ParsedCmd } from "./types";
+// Флаг: фиксировать риск после завершения набора позиции (env)
+const RISK_LOCK_AFTER_FILL = String(process.env.RISK_LOCK_AFTER_FILL || "").toLowerCase() === "1"
+  || String(process.env.RISK_LOCK_AFTER_FILL || "").toLowerCase() === "true";
 
 export async function runCommand(
   ex: BinanceFutures,
@@ -532,8 +535,9 @@ export async function runCommand(
             const positionUsd = posSize * entryAvg;
 
             const totalUsd = task.totalUsd ?? positionUsd;
-            const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
-            const effectiveRiskUsd = baseRisk * Math.min(1, positionUsd / Math.max(1, totalUsd));
+          const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
+          const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
+          const effectiveRiskUsd = baseRisk * factor;
 
             const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
@@ -795,7 +799,8 @@ export async function runCommand(
           const totalPlannedUsd = task.totalUsd ?? positionUsd;
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
           const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk;
-          const effectiveRiskUsd = baseRisk * Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+          const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+          const effectiveRiskUsd = baseRisk * factor;
 
           const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
           const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
