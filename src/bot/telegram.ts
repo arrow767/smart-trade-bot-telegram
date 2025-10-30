@@ -17,7 +17,26 @@ const allowedChatIds = allowedChatsEnv ? allowedChatsEnv.split(",").map(s=>Numbe
 function isAllowed(ctx:any){ if (allowedChatIds.length===0 && !allowedUserEnv) return true; const chatId=Number(ctx.chat?.id ?? ctx.from?.id); const user=String(ctx.from?.username||"").toLowerCase(); return allowedChatIds.includes(chatId)|| (!!allowedUserEnv && user===allowedUserEnv); }
 function deny(ctx:any){ const chatId=Number(ctx.chat?.id ?? ctx.from?.id); const username=ctx.from?.username?`@${ctx.from.username}`:"(no username)"; return ctx.reply(`Access denied.\nchatId: <code>${chatId}</code>\nuser: <code>${username}</code>`, { parse_mode:"HTML" }); }
 
-const bot = new Telegraf(token);
+// Optional proxy agent for Telegram only
+const proxyUrl = (process.env.TELEGRAM_PROXY_URL || "").trim();
+let agent: any = undefined;
+if (proxyUrl) {
+  try {
+    if (/^socks/i.test(proxyUrl)) {
+      // socks5://user:pass@host:port
+      const { SocksProxyAgent } = await import("socks-proxy-agent");
+      agent = new (SocksProxyAgent as any)(proxyUrl);
+    } else if (/^http/i.test(proxyUrl) || /^https/i.test(proxyUrl)) {
+      // http(s)://user:pass@host:port
+      const { HttpsProxyAgent } = await import("https-proxy-agent");
+      agent = new (HttpsProxyAgent as any)(proxyUrl);
+    }
+  } catch (e) {
+    console.error("Failed to init TELEGRAM proxy agent:", e);
+  }
+}
+
+const bot = agent ? new Telegraf(token, { telegram: { agent } }) : new Telegraf(token);
 const ex = new BinanceFutures();
 const book = new TaskBook();
 
