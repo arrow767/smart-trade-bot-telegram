@@ -233,6 +233,36 @@
     - Применяется только к полю объёма USD (notional), цены остаются обычными числами
   - **Оценка:** 30–45 минут, низкий риск, покрыть юнит‑тестами для крайних кейсов
 
+### L. Telegram Presets (новое)
+- [ ] Добавить кнопку Presets в Telegram (Reply и Inline)
+  - **Где:** `src/bot/telegram.ts`
+  - **Действия:** показать список пресетов, выбрать default, быстрые `preset set`
+  - **Оценка:** 30–45 минут, риск низкий
+
+### M. Риск в процентах (новое)
+- [ ] Риск в процентах в пресетах: `trade_risk_percent` (% от aggregate)
+  - **Где:** `src/config/trading_config.ts`, `src/core/Planner.ts`, `src/core/engine.ts`
+  - **Детали:**
+    - Если задан `trade_risk_percent` (>0), базовый риск = `aggregate * trade_risk_percent / 100`
+    - Иначе использовать `trade_risk` (USD)
+    - Источник `aggregate`: по умолчанию `futures.total + spot.total` (или только futures — определить через флаг)
+  - **Оценка:** 1.5–2 часа, риск низкий/средний
+
+- [ ] Риск в процентах в команде: `[<risk%>] l|s <sym> ...`
+  - **Где:** `src/core/CommandParser.ts`, `src/core/engine.ts`
+  - **Детали:**
+    - Парсить `1%`, `0.5%` как `riskPercentOverride`
+    - Приоритет: `riskPercentOverride` > `riskUsdOverride` > риск пресета
+    - Конвертация: `riskUsd = aggregate * (riskPercentOverride/100)`
+  - **Оценка:** 1–1.5 часа, риск низкий
+
+- [ ] Источник aggregate для процентов
+  - **Где:** `src/core/engine.ts`, `README.md`
+  - **Детали:**
+    - При старте команды получать балансы: `fetchFuturesUSDTBalance()` + `fetchSpotUSDTBalance()`
+    - По умолчанию: `aggregate = futures.total + spot.total` (флаг `.env` — `RISK_PERCENT_SOURCE=futures|futures+spot`)
+  - **Оценка:** 30–45 минут, риск низкий
+
 ### D. Code Quality
 - [ ] **Добавить тесты** для критичных функций:
   - `computeQtyForUsdSmart`
