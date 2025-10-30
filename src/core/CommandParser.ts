@@ -166,7 +166,9 @@ export function parseLine(line: string): ParsedCmd | null {
   // MARKET-вход краткий: l <sym> <usd> [preset]
   if (p.length >= 3 && isFinite(Number(p[2])) && (p.length === 3 || isNaN(Number(p[3])))) {
     const usd = Number(p[2]);
-    const presetName = p[3] ? p[3] : DEFAULT_PRESET;
+    let presetName = p[3] ? p[3] : DEFAULT_PRESET;
+    // нормализация пресета вида s4h/l4h → 4h
+    if (presetName && /^[ls]/i.test(presetName)) presetName = presetName.slice(1);
     return {
       kind: "trade",
       dir: cmd as "l" | "s",
@@ -196,7 +198,9 @@ export function parseLine(line: string): ParsedCmd | null {
       dryRun = true;
       continue;
     }
+    // нормализация пресета вида s4h/l4h → 4h
     presetName = p[i];
+    if (presetName && /^[ls]/i.test(presetName)) presetName = presetName.slice(1);
   }
 
   return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null };

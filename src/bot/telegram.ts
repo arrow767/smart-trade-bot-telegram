@@ -41,7 +41,6 @@ const ex = new BinanceFutures();
 const book = new TaskBook();
 
 const mainKb = Markup.inlineKeyboard([
-  [ Markup.button.callback("➕ New trade", "NEW_TRADE") ],
   [ Markup.button.callback("📊 Positions", "POS"), Markup.button.callback("💰 Deposit", "DEP") ],
   [ Markup.button.callback("🧰 Tasks", "TASKS") ],
   [ Markup.button.callback("❌ Cancel All", "CANCEL_ALL"), Markup.button.callback("❓ Help", "HELP") ],
@@ -117,15 +116,7 @@ bot.action("HELP", async (ctx)=>{
   }
 });
 
-bot.action("NEW_TRADE", async (ctx)=>{
-  try {
-    if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
-    await ctx.reply(`Пришлите строку:\n<code>l xrp 500 2.45 4h</code>\nили маркет-вход: <code>l xrp 500 4h</code>`, { parse_mode: "HTML" });
-  } catch (e:any) {
-    console.error("NEW_TRADE action error:", e);
-  }
-});
+// кнопка NEW_TRADE удалена
 
 bot.action("POS", async (ctx)=>{
   try {
@@ -238,20 +229,19 @@ bot.on("text", async (ctx)=>{
 
     // быстрые цифры
     if (/^[0-9]$/.test(text)) {
-      const map: Record<string, any> = { "1":{kind:"positions"}, "2":{kind:"deposit"}, "3":{kind:"tasks"}, "9":{kind:"help"}, "0":{kind:"exit"} };
+      const map: Record<string, any> = { "1":{kind:"positions"}, "2":{kind:"deposit"}, "3":{kind:"tasks"}, "9":{kind:"help"} };
       const cmd = map[text];
       if (cmd?.kind==="help") {
         const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
         return ctx.reply(help, { parse_mode:"HTML", ...mainKb });
       }
-      if (cmd?.kind==="exit")  return ctx.reply("Диалог завершён. /start чтобы продолжить.", { ...mainKb });
       if (cmd) return runCommand(ex, book, cmd, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
     }
 
     const parsed = parseLine(text);
     if (!parsed) return ctx.reply(`Неверный формат. Пример:\n<code>l xrp 500 2.45 4h</code>`, { parse_mode:"HTML" });
 
-    if (parsed.kind==="exit")  return ctx.reply("Диалог завершён. /start чтобы продолжить.", { ...mainKb });
+    // команда exit удалена
     if (parsed.kind==="help")  {
       const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
       return ctx.reply(help, { parse_mode:"HTML", ...mainKb });
