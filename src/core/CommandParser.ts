@@ -12,6 +12,21 @@ function parseNumsCSV(s?: string): number[] | undefined {
   return nums;
 }
 
+// Парсинг объёма USD с суффиксами k/m/kk и разделителями '_'
+function parseHumanUsd(s?: string): number {
+  if (!s) return NaN;
+  const raw = String(s).replace(/_/g, "").trim();
+  const isKK = /(kk|кк)$/i.test(raw);
+  const isK = /([kк])$/i.test(raw);
+  const isM = /([mм])$/i.test(raw);
+  const numStr = raw.replace(/(kk|кк|k|к|m|м)$/i, "");
+  const base = Number(numStr);
+  if (!Number.isFinite(base)) return NaN;
+  if (isKK || isM) return base * 1_000_000;
+  if (isK) return base * 1_000;
+  return base;
+}
+
 /**
  * Парсинг командной строки
  */
@@ -174,8 +189,8 @@ export function parseLine(line: string): ParsedCmd | null {
   if (!rawTicker) return null;
 
   // MARKET-вход краткий: l <sym> <usd> [preset]
-  if (p.length >= idx+3 && isFinite(Number(p[idx+2])) && (p.length === idx+3 || isNaN(Number(p[idx+3])))) {
-    const usd = Number(p[idx+2]);
+  if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || isNaN(Number(p[idx+3])))) {
+    const usd = parseHumanUsd(p[idx+2]);
     const presetName = p[idx+3] ? p[idx+3] : DEFAULT_PRESET;
     return {
       kind: "trade",
@@ -191,8 +206,8 @@ export function parseLine(line: string): ParsedCmd | null {
 
   const legs: TradeLeg[] = [];
   let i = idx+2;
-  while (i + 1 < p.length && isFinite(Number(p[i])) && isFinite(Number(p[i + 1]))) {
-    const usd = Number(p[i]);
+  while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && isFinite(Number(p[i + 1]))) {
+    const usd = parseHumanUsd(p[i]);
     const price = Number(p[i + 1]);
     if (usd > 0 && price > 0) legs.push({ usd, price });
     i += 2;
