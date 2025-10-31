@@ -724,7 +724,6 @@ export async function runCommand(
         const entryAvg = Number(my?.entryPrice ?? 0) || 0;
 
         const open = await ex.fetchOpenOrders(symbolCcxt);
-        const open = await ex.fetchOpenOrders(symbolCcxt);
         const entriesLeft = open.filter((o) => o.id && keep.has(o.id)).length;
 
         // === Исправлено: надёжное определение «снято вручную» ===
