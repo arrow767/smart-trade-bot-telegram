@@ -42,10 +42,11 @@ export async function cancelOnlySL(
   for (const o of open) {
     const isEntry = o.id && keepIds.has(o.id);
     if (isEntry) continue;
-    const t = String(o.type || "").toLowerCase();
+    const t = String(o.type || "").toUpperCase();
     const isClose = o.info?.closePosition === true || o.info?.closePosition === "true";
-    const looksLikeSL = t.includes("stop");
-    if (isClose || looksLikeSL) {
+    // Снимаем только STOP_MARKET с closePosition=true (SL закрывает всю позицию)
+    // НЕ снимаем STOP_MARKET без closePosition и не снимаем другие типы ордеров
+    if (isClose && t.includes("STOP")) {
       try { await ex.cancelOrder(symbolCcxt, o.id!); } catch {}
     }
   }
