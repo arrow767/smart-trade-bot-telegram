@@ -57,6 +57,32 @@ export class BinanceFutures {
   private lastSyncTs = 0;
   private SYNC_TTL = 30_000; // обновлять смещение раз в 30 сек
 
+  // ====== НОВОЕ: простое кэширование горячих REST-вызовов ======
+  private ordersCache = new Map<string, { ts: number; data: any[] }>();
+  private orderCacheMs = Number(process.env.BINANCE_CACHE_ORDERS_MS || 1000);
+  private positionsCache?: { ts: number; data: any[] };
+  private positionCacheMs = Number(process.env.BINANCE_CACHE_POSITIONS_MS || 1500);
+  private positionSizeCache = new Map<string, { ts: number; size: number }>();
+  private positionSizeCacheMs = Number(process.env.BINANCE_CACHE_POSITION_SIZE_MS || 800);
+  private tickerCache = new Map<string, { ts: number; data: any }>();
+  private tickerCacheMs = Number(process.env.BINANCE_CACHE_TICKER_MS || 800);
+
+  private ordersCache = new Map<string, { ts: number; data: any[] }>();
+  private orderCacheMs = Number(process.env.BINANCE_CACHE_ORDERS_MS || 1000);
+  private positionsCache?: { ts: number; data: any[] };
+  private positionCacheMs = Number(process.env.BINANCE_CACHE_POSITIONS_MS || 1500);
+  private positionSizeCache = new Map<string, { ts: number; size: number }>();
+  private tickerCache = new Map<string, { ts: number; data: any }>();
+  private tickerCacheMs = Number(process.env.BINANCE_CACHE_TICKER_MS || 800);
+
+  private clearOrderCache(symbol: string) { this.ordersCache.delete(symbol); }
+  private clearTickerCache(symbol: string) { this.tickerCache.delete(symbol); }
+  private clearPositionCaches(symbol?: string) {
+    this.positionsCache = undefined;
+    if (symbol) this.positionSizeCache.delete(symbol);
+    else this.positionSizeCache.clear();
+  }
+
   constructor(opts?: { apiKey?: string; secret?: string; enableRateLimit?: boolean }) {
     // допускаем отсутствие opts: возьмём из env
     this.apiKey = opts?.apiKey ?? readEnv("BINANCE_API_KEY", "BINANCE_KEY");
@@ -103,6 +129,14 @@ export class BinanceFutures {
       } as any);
     }
     return this.sapi!;
+  }
+
+  // ====== Кэш-хелперы ======
+  private clearOrderCache(symbol: string) { this.ordersCache.delete(symbol); }
+  private clearTickerCache(symbol: string) { this.tickerCache.delete(symbol); }
+  private clearPositionsCache() { this.positionsCache = undefined; }
+  private clearPositionSizeCache(symbol?: string) {
+    if (symbol) this.positionSizeCache.delete(symbol); else this.positionSizeCache.clear();
   }
 
   // ====== ДОБАВЛЕНО: жёсткая синхронизация со временем Binance ======
@@ -222,8 +256,15 @@ export class BinanceFutures {
     symbol: string; side: "long"|"short"; contracts: number; entryPrice: number; unrealizedPnlUsd: number;
   }>> {
     this.ensureKeysOrThrow();
-    const positions = await this.withRetry(() => this.fapi.fetchPositions());
-    return positions
+    const now = Date.now();
+    let positionsRaw: any[] | undefined;
+    if (this.positionsCache && now - this.positionsCache.ts < this.positionCacheMs) {
+      positionsRaw = this.positionsCache.data as any[];
+    } else {
+      positionsRaw = await this.withRetry(() => this.fapi.fetchPositions());
+      this.positionsCache = { ts: now, data: positionsRaw };
+    }
+    return positionsRaw
       .map((p: any) => {
         const amtSigned = Number(p?.info?.positionAmt ?? 0); // важен ЗНАК
         const qtyAbs = Math.abs(amtSigned);
@@ -240,34 +281,56 @@ export class BinanceFutures {
 
   async fetchPositionSize(symbol: string): Promise<number> {
     this.ensureKeysOrThrow();
+    const now = Date.now();
+    const cached = this.positionSizeCache.get(symbol);
+    if (cached && now - cached.ts < this.positionSizeCacheMs) return cached.size;
     const positions = await this.withRetry(() => this.fapi.fetchPositions([symbol]));
     const p: any = positions?.[0];
     const amtSigned = Number(p?.info?.positionAmt ?? 0);
+    this.positionSizeCache.set(symbol, { ts: now, size: amtSigned });
     return amtSigned;
   }
 
   async fetchTicker(symbol: string) {
     // тикер публичный — ключи не нужны, но таймауты бывают, поэтому тоже ретраим
-    return this.withRetry(() => this.fapi.fetchTicker(symbol));
+    const now = Date.now();
+    const cached = this.tickerCache.get(symbol);
+    if (cached && now - cached.ts < this.tickerCacheMs) return cached.data;
+    const data = await this.withRetry(() => this.fapi.fetchTicker(symbol));
+    this.tickerCache.set(symbol, { ts: now, data });
+    return data;
   }
 
-  async fetchOpenOrders(symbol: string) {
+  async fetchOpenOrders(symbol: string, opts?: { force?: boolean }) {
     this.ensureKeysOrThrow();
     // прокинем recvWindow для надёжности
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
-    return this.withRetry(() => this.fapi.fetchOpenOrders(symbol, undefined, undefined, { recvWindow }));
+    const now = Date.now();
+    const cached = this.ordersCache.get(symbol);
+    if (!opts?.force && cached && now - cached.ts < this.orderCacheMs) {
+      return cached.data;
+    }
+    const data = await this.withRetry(() => this.fapi.fetchOpenOrders(symbol, undefined, undefined, { recvWindow }));
+    this.ordersCache.set(symbol, { ts: now, data });
+    return data;
   }
 
   async cancelOrder(symbol: string, id: string) {
     this.ensureKeysOrThrow();
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
-    return this.withRetry(() => this.fapi.cancelOrder(id, symbol, { recvWindow }));
+    const res = await this.withRetry(() => this.fapi.cancelOrder(id, symbol, { recvWindow }));
+    this.clearOrderCache(symbol);
+    this.clearTickerCache(symbol);
+    return res;
   }
 
   async cancelAllOrders(symbol: string) {
     this.ensureKeysOrThrow();
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
-    return this.withRetry(() => this.fapi.cancelAllOrders(symbol, { recvWindow }));
+    const res = await this.withRetry(() => this.fapi.cancelAllOrders(symbol, { recvWindow }));
+    this.clearOrderCache(symbol);
+    this.clearTickerCache(symbol);
+    return res;
   }
 
   // ====== Вспомогательное: поиск ордера по clientOrderId ======
@@ -293,7 +356,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
@@ -318,7 +384,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
@@ -339,7 +408,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         // при unknown проверяем позицию — если увеличилась, считаем что исполнилось
@@ -369,7 +441,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
@@ -391,7 +466,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
@@ -412,7 +490,10 @@ export class BinanceFutures {
       recvWindow,
     });
     try {
-      return await this.withRetry(place);
+      const r = await this.withRetry(place);
+      this.clearOrderCache(symbol);
+      this.clearTickerCache(symbol);
+      return r;
     } catch (e: any) {
       if (isTimeoutOrUnknown(e)) {
         // reduce-only market после unknown: проверим, не уменьшилась ли позиция

@@ -724,6 +724,7 @@ export async function runCommand(
         const entryAvg = Number(my?.entryPrice ?? 0) || 0;
 
         const open = await ex.fetchOpenOrders(symbolCcxt);
+        const open = await ex.fetchOpenOrders(symbolCcxt);
         const entriesLeft = open.filter((o) => o.id && keep.has(o.id)).length;
 
         // === Исправлено: надёжное определение «снято вручную» ===
@@ -897,7 +898,7 @@ export async function runCommand(
           if (!open.find((o) => o.id === id)) keep.delete(id);
         }
 
-        await new Promise((r) => setTimeout(r, 1000));
+        await new Promise((r) => setTimeout(r, 1200));
       }
     } catch (err: any) {
       const t = book.get(task.id);
