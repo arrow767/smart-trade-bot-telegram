@@ -125,7 +125,7 @@ export function formatDeposit(
   const lines: string[] = [futRow, unrealRow];
   if (typeof p.exposureUsd === "number") {
     const levStr = typeof p.leverage === "number" && p.leverage > 0 ? `  lev≈${p.leverage.toFixed(2)}x` : "";
-    lines.push(`exposure: ${p.exposureUsd.toFixed(2)}$${levStr}`);
+    lines.push(`сумма позиций: ${p.exposureUsd.toFixed(2)}$${levStr}`);
   }
   if (typeof p.spotTotal === "number") {
     lines.push(`spot:     total=${(p.spotTotal ?? 0).toFixed(2)}  free=${(p.spotFree ?? 0).toFixed(2)}  used=${(p.spotUsed ?? 0).toFixed(2)}`);
