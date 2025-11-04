@@ -116,12 +116,17 @@ export function formatDeposit(
   p: {
     total: number; free: number; used: number; unreal: number;
     spotTotal?: number; spotFree?: number; spotUsed?: number; grandTotal?: number;
+    exposureUsd?: number; leverage?: number;
   }
 ) {
   // Табличный компактный стиль в Telegram, табличный блок в консоли
   const futRow = `futures:  total=${p.total.toFixed(2)}  free=${p.free.toFixed(2)}  used=${p.used.toFixed(2)}`;
   const unrealRow = `unrealized: ${mode === "console" ? fmtPnl(mode, p.unreal) : `${p.unreal >= 0 ? "+" : ""}${p.unreal.toFixed(2)}$`}`;
   const lines: string[] = [futRow, unrealRow];
+  if (typeof p.exposureUsd === "number") {
+    const levStr = typeof p.leverage === "number" && p.leverage > 0 ? `  lev≈${p.leverage.toFixed(2)}x` : "";
+    lines.push(`exposure: ${p.exposureUsd.toFixed(2)}$${levStr}`);
+  }
   if (typeof p.spotTotal === "number") {
     lines.push(`spot:     total=${(p.spotTotal ?? 0).toFixed(2)}  free=${(p.spotFree ?? 0).toFixed(2)}  used=${(p.spotUsed ?? 0).toFixed(2)}`);
   }

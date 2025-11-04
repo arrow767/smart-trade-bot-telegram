@@ -247,12 +247,17 @@ export async function runCommand(
 
     const positions = await ex.fetchAllOpenPositions();
     const unreal = positions.reduce((a, p) => a + (Number(p.unrealizedPnlUsd) || 0), 0);
+    // Экспозиция как сумма |qty|*entryPrice (без тикеров, чтобы не спамить REST)
+    const exposureUsd = positions.reduce((s, p) => s + Math.abs(p.contracts || 0) * (Number(p.entryPrice) || 0), 0);
+    const equity = futures.total || 0;
+    const leverage = equity > 0 ? exposureUsd / equity : 0;
     const grandTotal = Number(futures.total || 0) + Number(spotTotal || 0);
 
     info(
       formatDeposit(mode, {
         total: futures.total, free: futures.free, used: futures.used,
         unreal, spotTotal, spotFree, spotUsed, grandTotal,
+        exposureUsd, leverage,
       } as any)
     );
     return;
@@ -517,6 +522,7 @@ export async function runCommand(
         let lastAvg = 0;
         let tpsPlaced = false;
         let slPxCurrent: number | undefined;
+        const tpIndexById = new Map<string, number>();
 
         for (;;) {
           const tick = await ex.fetchTicker(symbolCcxt);
@@ -561,7 +567,8 @@ export async function runCommand(
                 const q = tpQtys[i];
                 if (q <= 0) continue;
                 const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-                await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+                const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+                if (ord?.id) tpIndexById.set(String(ord.id), i + 1);
               }
               tpsPlaced = true;
 
@@ -586,8 +593,8 @@ export async function runCommand(
             await ex.cancelAllOrders(symbolCcxt).catch(() => {});
             const markNow = Number((await ex.fetchTicker(symbolCcxt)).last ?? 0);
             const wasSL = slPxCurrent && ((side === "long" && markNow <= (slPxCurrent + (f.tickSize||0))) || (side === "short" && markNow >= (slPxCurrent - (f.tickSize||0))));
-            info(mode === "console" ? (wasSL ? `SL сработал по ${symbolCcxt}. Задача удалена.` : `Позиция ${symbolCcxt} закрыта. Задача удалена.`)
-              : (wasSL ? `<b>SL сработал</b> по <code>${symbolCcxt}</code>. Задача удалена.` : `<b>Позиция закрыта</b> по <code>${symbolCcxt}</code>. Задача удалена.`));
+            info(mode === "console" ? (wasSL ? `SL сработал по ${symbolCcxt}. Задачу #${task.id} удалил.` : `Позиция ${symbolCcxt} закрыта. Задачу #${task.id} удалил.`)
+              : (wasSL ? `<b>SL сработал</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.` : `<b>Позиция закрыта</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.`));
             book.remove(task.id);
             break;
           }
@@ -781,8 +788,8 @@ export async function runCommand(
             book.remove(task.id);
             info(
               mode === "console"
-                ? `🧹 Все входные отложенные заявки задачи сняты вручную — задачу удалил.`
-                : `<b>🧹 Все входные отложенные заявки задачи сняты вручную</b> — задачу удалил.`
+                ? `🧹 Все входные заявки сняты вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
+                : `<b>🧹 Все входные заявки сняты вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
             );
             return;
           }
@@ -859,7 +866,18 @@ export async function runCommand(
 
         if (decreased) {
           const closed = -delta;
-          info(mode === "console" ? `TP/выход: -${closed.toFixed(5)} по ${symbolCcxt}` : `<b>TP/выход</b>: −${closed.toFixed(5)} по <code>${symbolCcxt}</code>`);
+          let tpNo: number | undefined;
+          try {
+            const current = await ex.fetchOpenOrders(symbolCcxt);
+            const openIds = new Set(current.map(o=>String(o.id||"")));
+            // tpIndexById может отсутствовать в этой ветке — создадим локально, если нет
+            // (безопасно: просто не будет номера)
+            const map = (typeof tpIndexById !== "undefined" ? tpIndexById : new Map<string, number>());
+            const gone = Array.from(map.entries()).filter(([id])=>!openIds.has(id)).map(([,idx])=>idx);
+            if (gone.length) tpNo = Math.min(...gone);
+          } catch {}
+          const tpTag = tpNo ? `TP${tpNo}` : `TP`;
+          info(mode === "console" ? `${tpTag}/выход: -${closed.toFixed(5)} по ${symbolCcxt}` : `<b>${tpTag}/выход</b>: −${closed.toFixed(5)} по <code>${symbolCcxt}</code>`);
           lastSize = posSize;
           lastAvg = entryAvg;
         }
