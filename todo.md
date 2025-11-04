@@ -308,6 +308,13 @@
   - Где: `src/core/engine.ts` (периодическая проверка/гарбедж‑коллектор)
   - Оценка: 20–30 минут, риск низкий
 
+### T. Расширение deposit: экспозиция и плечо (новое)
+- [ ] В `deposit` считать суммарный объём (notional) по всем открытым perp‑позициям и показывать итоговое плечо
+  - Экспозиция: `Σ |contracts| × markPrice` по всем позициям (или entryPrice — флагом)
+  - Плечо: `exposure / equity`, где `equity` по умолчанию `futures.total`; опция `.env`: `DEPOSIT_EQUITY_SOURCE=futures|aggregate`
+  - Где: `src/core/engine.ts` (обработка команды deposit), `src/core/format.ts` (вывод)
+  - Оценка: 45–60 минут, риск низкий (с учётом имеющегося кэша тикеров)
+
 ### D. Code Quality
 - [ ] **Добавить тесты** для критичных функций:
   - `computeQtyForUsdSmart`
