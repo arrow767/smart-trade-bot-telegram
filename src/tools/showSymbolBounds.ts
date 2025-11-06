@@ -3,6 +3,14 @@ import ccxt from 'ccxt';
 import { BinanceFutures } from '../exch/BinanceFutures';
 import { normalizeTickerToUsdt } from '../core/SymbolResolver';
 
+function group(n: number, fractionDigits?: number) {
+  if (!Number.isFinite(n)) return '-';
+  const s = fractionDigits != null ? n.toFixed(fractionDigits) : String(n);
+  const [intPart, fracPart] = s.split('.');
+  const g = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return fracPart ? `${g}.${fracPart}` : g;
+}
+
 async function main() {
   const raw = process.argv[2];
   if (!raw) {
@@ -29,10 +37,10 @@ async function main() {
   const maxUsd = maxQty != null ? maxQty * price : NaN;
 
   console.log(`Symbol: ${symbolCcxt}`);
-  console.log(`Price: ${price}`);
+  console.log(`Price: ${group(price, 6)}`);
   console.log(`minQty=${minQty}, stepSize=${stepSize}, tickSize=${tickSize}`);
-  console.log(`maxQty=${maxQty ?? '-'}, minNotional=${minNotional ?? '-'}`);
-  console.log(`minUsd@price=${minUsd}${Number.isFinite(maxUsd) ? `, maxUsd@price=${maxUsd}` : ''}`);
+  console.log(`maxQty=${maxQty != null ? group(maxQty) : '-'}, minNotional=${minNotional != null ? group(minNotional) : '-'}`);
+  console.log(`minUsd@price=${group(minUsd)}${Number.isFinite(maxUsd) ? `, maxUsd@price=${group(maxUsd)}` : ''}`);
 
   // Leverage brackets (tiers)
   try {
@@ -55,8 +63,8 @@ async function main() {
         const lev = Number(b.initialLeverage);
         const floor = Number(b.notionalFloor);
         const mmr = Number(b.maintMarginRatio);
-        const capStr = cap > 0 && Number.isFinite(cap) ? cap.toString() : '∞';
-        console.log(`  ${floor} .. ${capStr} USD → maxLev=${lev}, maintMarginRatio=${mmr}`);
+        const capStr = cap > 0 && Number.isFinite(cap) ? group(cap) : '∞';
+        console.log(`  ${group(floor)} .. ${capStr} USD → maxLev=${lev}, maintMarginRatio=${mmr}`);
       }
     } else {
       console.log('Leverage tiers: unavailable');
