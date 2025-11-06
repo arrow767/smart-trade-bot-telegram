@@ -247,6 +247,32 @@ export class BinanceFutures {
   amountToPrecision(symbol: string, amount: number) { return this.fapi.amountToPrecision(symbol, amount); }
   priceToPrecision(symbol: string, price: number) { return this.fapi.priceToPrecision(symbol, price); }
 
+  // ====== Leverage info ======
+  async fetchLeverageBrackets(symbol: string): Promise<Array<{ notionalFloor: number; notionalCap: number; initialLeverage: number; maintMarginRatio: number }>> {
+    this.ensureKeysOrThrow();
+    await this.loadMarkets().catch(() => {});
+    const m: any = this.fapi.market(symbol);
+    const data = await this.withRetry(() => (this.fapi as any).fapiPrivateGetLeverageBracket({ symbol: m.id }));
+    const rec = Array.isArray(data) ? (data.find((x: any) => x?.symbol === m.id) || data[0]) : data;
+    const brackets = rec?.brackets || rec?.[0]?.brackets || [];
+    return (brackets as any[]).map((b: any) => ({
+      notionalFloor: Number(b.notionalFloor),
+      notionalCap: Number(b.notionalCap),
+      initialLeverage: Number(b.initialLeverage),
+      maintMarginRatio: Number(b.maintMarginRatio),
+    }));
+  }
+
+  async fetchCurrentLeverage(symbol: string): Promise<number | undefined> {
+    this.ensureKeysOrThrow();
+    await this.loadMarkets().catch(() => {});
+    const m: any = this.fapi.market(symbol);
+    const risk = await this.withRetry(() => (this.fapi as any).fapiPrivateGetPositionRisk({ symbol: m.id }));
+    const r = Array.isArray(risk) ? risk[0] : risk;
+    const lev = Number(r?.leverage);
+    return Number.isFinite(lev) && lev > 0 ? lev : undefined;
+  }
+
   // ====== Балансы ======
   async fetchFuturesUSDTBalance(): Promise<{ total: number; free: number; used: number }> {
     this.ensureKeysOrThrow();

@@ -71,12 +71,17 @@ export async function runCommand(
 
   // Порог для дробления крупных ног + динамические границы из фильтров
   const ENV_CAP_USD = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
+  const ALIGN_TO_CURRENT_LEV = String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "1" || String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "true";
+  let tierCapUsdForAlign: number | undefined;
   function calcBoundsUsd(price: number) {
     const f: any = ex.getSymbolFilters(symbolCcxt) as any;
     const minUsd = Math.max((Number(f.minQty) || 0) * price, Number(f.minNotional) || 0);
     const maxUsdFilter = (f.maxQty ? Number(f.maxQty) * price : Infinity);
     const envCap = ENV_CAP_USD > 0 ? ENV_CAP_USD : Infinity;
-    const maxUsd = Math.min(envCap, Number.isFinite(maxUsdFilter) && maxUsdFilter > 0 ? maxUsdFilter : Infinity);
+    let maxUsd = Math.min(envCap, Number.isFinite(maxUsdFilter) && maxUsdFilter > 0 ? maxUsdFilter : Infinity);
+    if (ALIGN_TO_CURRENT_LEV && Number.isFinite(tierCapUsdForAlign as number)) {
+      maxUsd = Math.min(maxUsd, tierCapUsdForAlign as number);
+    }
     return { minUsd, maxUsd: Number.isFinite(maxUsd) ? maxUsd : envCap };
   }
   const splitLegsByUsd = (legsIn: TradeLeg[]): TradeLeg[] => {
@@ -90,8 +95,8 @@ export async function runCommand(
 
       if (remain < minUsd) {
         out.push({ usd: remain, price });
-        continue;
-      }
+      continue;
+    }
       while (remain > effMax + 1e-9) {
         out.push({ usd: effMax, price });
         remain -= effMax;
@@ -99,7 +104,7 @@ export async function runCommand(
       if (remain > 1e-9) {
         if (remain < minUsd && out.length && out[out.length - 1].price === price) {
           out[out.length - 1].usd += remain;
-        } else {
+  } else {
           out.push({ usd: remain, price });
         }
       }
@@ -459,7 +464,23 @@ export async function runCommand(
     const openEntryIdsOrdered = entryIds.filter((id) => openIds.has(id));
 
     const results: string[] = [];
+    // Опционально подстройка по текущему плечу для edit
+    let tierCapUsdForAlignEdit: number | undefined;
+    if (ALIGN_TO_CURRENT_LEV) {
+      try {
+        const currentLev = await ex.fetchCurrentLeverage(symbolCcxt);
+        const brackets = await ex.fetchLeverageBrackets(symbolCcxt);
+        if (currentLev && brackets && brackets.length) {
+          const candidates = brackets.filter(b => Number(b.initialLeverage) >= currentLev && Number(b.notionalCap) > 0);
+          const cap = (candidates.length ? Math.min(...candidates.map(b => Number(b.notionalCap))) : Math.max(...brackets.map(b => Number(b.notionalCap) || 0)));
+          if (Number.isFinite(cap) && cap > 0) tierCapUsdForAlignEdit = cap * 0.999;
+        }
+      } catch {}
+    }
+    const oldAlign = tierCapUsdForAlign;
+    if (tierCapUsdForAlignEdit != null) tierCapUsdForAlign = tierCapUsdForAlignEdit;
     const legsForEdit: TradeLeg[] = splitLegsByUsd(parsed.legs as TradeLeg[]);
+    tierCapUsdForAlign = oldAlign;
     for (let i = 0; i < legsForEdit.length; i++) {
       const leg = legsForEdit[i];
       const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
@@ -697,6 +718,19 @@ export async function runCommand(
 
   // Выставляем входы
   const entryIds: string[] = [];
+  // Опционально подстраиваем max по текущему плечу (берём границу бранкета для текущего левереджа)
+  if (ALIGN_TO_CURRENT_LEV) {
+    try {
+      const currentLev = await ex.fetchCurrentLeverage(symbolCcxt);
+      const brackets = await ex.fetchLeverageBrackets(symbolCcxt);
+      if (currentLev && brackets && brackets.length) {
+        // найдём верхнюю границу нотионала, где initialLeverage >= currentLev
+        const candidates = brackets.filter(b => Number(b.initialLeverage) >= currentLev && Number(b.notionalCap) > 0);
+        const cap = (candidates.length ? Math.min(...candidates.map(b => Number(b.notionalCap))) : Math.max(...brackets.map(b => Number(b.notionalCap) || 0)));
+        if (Number.isFinite(cap) && cap > 0) tierCapUsdForAlign = cap * 0.999; // небольшой запас
+      }
+    } catch {}
+  }
   const legsForPlacement: TradeLeg[] = splitLegsByUsd(legs as TradeLeg[]);
   for (const leg of legsForPlacement) {
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
