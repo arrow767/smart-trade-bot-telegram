@@ -26,6 +26,7 @@ import {
 import { 
   ParsedCmd, 
   DEFAULT_PRESET,
+  TradeLeg,
 } from "./types";
 import { TaskBook } from "./TaskBook";
 import { 
@@ -67,6 +68,24 @@ export async function runCommand(
     info(mode === "console" ? buildHelp(mode) : `<pre>${buildHelp(mode)}</pre>`);
     return;
   }
+
+  // Порог для дробления крупных ног на части (в $). 0/пусто — без дробления.
+  const MAX_USD_PER_ENTRY = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
+  const splitLegsByUsd = (legsIn: TradeLeg[]): TradeLeg[] => {
+    if (!(MAX_USD_PER_ENTRY > 0)) return legsIn;
+    const res: TradeLeg[] = [];
+    for (const leg of legsIn) {
+      let remain = Number(leg.usd);
+      const price = Number(leg.price);
+      if (!(remain > MAX_USD_PER_ENTRY)) { res.push(leg); continue; }
+      while (remain > MAX_USD_PER_ENTRY + 1e-9) {
+        res.push({ usd: MAX_USD_PER_ENTRY, price });
+        remain -= MAX_USD_PER_ENTRY;
+      }
+      if (remain > 1e-9) res.push({ usd: remain, price });
+    }
+    return res;
+  };
 
   // --- НОВОЕ: просмотр ордеров ---
   if (parsed.kind === "orders") {
@@ -420,8 +439,9 @@ export async function runCommand(
     const openEntryIdsOrdered = entryIds.filter((id) => openIds.has(id));
 
     const results: string[] = [];
-    for (let i = 0; i < parsed.legs.length; i++) {
-      const leg = parsed.legs[i];
+    const legsForEdit: TradeLeg[] = splitLegsByUsd(parsed.legs as TradeLeg[]);
+    for (let i = 0; i < legsForEdit.length; i++) {
+      const leg = legsForEdit[i];
       const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
       if (pick.tooSmall || !(pick.qty > 0)) {
         results.push(`skip ($${leg.usd.toFixed(2)} @ ${leg.price} меньше minQty/step)`);
@@ -657,7 +677,8 @@ export async function runCommand(
 
   // Выставляем входы
   const entryIds: string[] = [];
-  for (const leg of legs) {
+  const legsForPlacement: TradeLeg[] = splitLegsByUsd(legs as TradeLeg[]);
+  for (const leg of legsForPlacement) {
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
     if (pick.tooSmall || !(pick.qty > 0)) {
       info(`[SKIP] $${leg.usd.toFixed(2)} @ ${leg.price} — меньше minQty/step для ${symbolCcxt}`);
