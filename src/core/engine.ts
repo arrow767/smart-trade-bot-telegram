@@ -69,22 +69,42 @@ export async function runCommand(
     return;
   }
 
-  // Порог для дробления крупных ног на части (в $). 0/пусто — без дробления.
-  const MAX_USD_PER_ENTRY = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
+  // Порог для дробления крупных ног + динамические границы из фильтров
+  const ENV_CAP_USD = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
+  function calcBoundsUsd(price: number) {
+    const f: any = ex.getSymbolFilters(symbolCcxt) as any;
+    const minUsd = Math.max((Number(f.minQty) || 0) * price, Number(f.minNotional) || 0);
+    const maxUsdFilter = (f.maxQty ? Number(f.maxQty) * price : Infinity);
+    const envCap = ENV_CAP_USD > 0 ? ENV_CAP_USD : Infinity;
+    const maxUsd = Math.min(envCap, Number.isFinite(maxUsdFilter) && maxUsdFilter > 0 ? maxUsdFilter : Infinity);
+    return { minUsd, maxUsd: Number.isFinite(maxUsd) ? maxUsd : envCap };
+  }
   const splitLegsByUsd = (legsIn: TradeLeg[]): TradeLeg[] => {
-    if (!(MAX_USD_PER_ENTRY > 0)) return legsIn;
-    const res: TradeLeg[] = [];
+    const out: TradeLeg[] = [];
     for (const leg of legsIn) {
-      let remain = Number(leg.usd);
       const price = Number(leg.price);
-      if (!(remain > MAX_USD_PER_ENTRY)) { res.push(leg); continue; }
-      while (remain > MAX_USD_PER_ENTRY + 1e-9) {
-        res.push({ usd: MAX_USD_PER_ENTRY, price });
-        remain -= MAX_USD_PER_ENTRY;
+      const { minUsd, maxUsd } = calcBoundsUsd(price);
+      let remain = Number(leg.usd);
+      const effMax = Math.max(maxUsd, minUsd || 0);
+      if (!(effMax > 0) || !Number.isFinite(effMax)) { out.push(leg); continue; }
+
+      if (remain < minUsd) {
+        out.push({ usd: remain, price });
+        continue;
       }
-      if (remain > 1e-9) res.push({ usd: remain, price });
+      while (remain > effMax + 1e-9) {
+        out.push({ usd: effMax, price });
+        remain -= effMax;
+      }
+      if (remain > 1e-9) {
+        if (remain < minUsd && out.length && out[out.length - 1].price === price) {
+          out[out.length - 1].usd += remain;
+        } else {
+          out.push({ usd: remain, price });
+        }
+      }
     }
-    return res;
+    return out;
   };
 
   // --- НОВОЕ: просмотр ордеров ---

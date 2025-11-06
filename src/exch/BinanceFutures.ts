@@ -4,6 +4,8 @@ export type SymbolFilters = {
   minQty: number;
   stepSize: number;
   tickSize: number;
+  maxQty?: number;
+  minNotional?: number;
 };
 
 function readEnv(key: string, ...alts: string[]): string | undefined {
@@ -197,20 +199,30 @@ export class BinanceFutures {
   async loadMarkets() { return this.withRetry(() => this.fapi.loadMarkets()); }
   market(symbol: string) { return this.fapi.market(symbol); }
 
-  // ✅ Берём шаги из нативных фильтров Binance (LOT_SIZE / PRICE_FILTER)
+  // ✅ Берём шаги из нативных фильтров Binance (LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL / MARKET_LOT_SIZE)
   getSymbolFilters(symbol: string): SymbolFilters {
     const m: any = this.fapi.market(symbol);
     let minQty = 0, stepSize = 0.0001, tickSize = 0.0001;
+    let maxQty: number | undefined;
+    let minNotional: number | undefined;
 
     const filters: any[] = m?.info?.filters || [];
     const lot = filters.find((f) => f?.filterType === "LOT_SIZE");
     const priceF = filters.find((f) => f?.filterType === "PRICE_FILTER");
+    const marketLot = filters.find((f) => f?.filterType === "MARKET_LOT_SIZE");
+    const notional = filters.find((f) => ["NOTIONAL","MIN_NOTIONAL"].includes(String(f?.filterType)));
 
     if (lot) {
       const mq = Number(lot.minQty);
       const ss = Number(lot.stepSize);
+      const mx = Number(lot.maxQty);
       if (Number.isFinite(mq) && mq > 0) minQty = mq;
       if (Number.isFinite(ss) && ss > 0) stepSize = ss;
+      if (Number.isFinite(mx) && mx > 0) maxQty = mx;
+    }
+    if (!maxQty && marketLot) {
+      const mx = Number(marketLot.maxQty);
+      if (Number.isFinite(mx) && mx > 0) maxQty = mx;
     }
 
     if (priceF) {
@@ -221,10 +233,15 @@ export class BinanceFutures {
       tickSize = Math.pow(10, -m.precision.price);
     }
 
+    if (notional) {
+      const mn = Number((notional as any).minNotional ?? (notional as any).minNotionalValue ?? (notional as any).notional);
+      if (Number.isFinite(mn) && mn > 0) minNotional = mn;
+    }
+
     // если minQty не пришёл, но есть stepSize — логично приравнять
     if (!minQty && stepSize) minQty = stepSize;
 
-    return { minQty: Number(minQty), stepSize: Number(stepSize), tickSize: Number(tickSize) };
+    return { minQty: Number(minQty), stepSize: Number(stepSize), tickSize: Number(tickSize), maxQty, minNotional };
   }
 
   amountToPrecision(symbol: string, amount: number) { return this.fapi.amountToPrecision(symbol, amount); }
