@@ -405,6 +405,17 @@ export class BinanceFutures {
     return data;
   }
 
+  // Получить ВСЕ открытые ордера со всех символов
+  async fetchAllOpenOrdersAcrossSymbols(): Promise<any[]> {
+    this.ensureKeysOrThrow();
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    // Прямой вызов Binance API без указания символа
+    const response = await this.withRetry(() => 
+      (this.fapi as any).fapiPrivateGetOpenOrders({ recvWindow })
+    );
+    return Array.isArray(response) ? response : [];
+  }
+
   async cancelOrder(symbol: string, id: string) {
     this.ensureKeysOrThrow();
     const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);

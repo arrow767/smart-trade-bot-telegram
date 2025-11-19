@@ -306,7 +306,7 @@ export function formatOrders(
   rows: Array<{
     id: string;
     symbol: string;
-    kind: "LIMIT" | "STOP";
+    kind: "LIMIT" | "STOP" | "MARKET";
     side: "buy" | "sell";
     qty: number;
     price?: number;
@@ -327,7 +327,7 @@ export function formatOrders(
     kind: r.kind,
     side: r.side.toLowerCase() === "buy" ? "B" : "S",
     qty: fix3(r.qty),
-    px: r.kind === "LIMIT" ? (r.price ?? 0) : (r.stopPrice ?? 0),
+    px: r.kind === "STOP" ? (r.stopPrice ?? 0) : (r.price ?? 0),
     ro: r.reduceOnly ? "RO" : "",
     cp: r.closePosition ? "CP" : "",
     dt: formatTime(r.datetime || ""),

@@ -134,19 +134,20 @@ export async function runCommand(
   // --- НОВОЕ: просмотр ордеров ---
   if (parsed.kind === "orders") {
     const rows: Array<{
-      id: string; symbol: string; kind: "LIMIT"|"STOP"; side: "buy"|"sell";
+      id: string; symbol: string; kind: "LIMIT"|"STOP"|"MARKET"; side: "buy"|"sell";
       qty: number; price?: number; stopPrice?: number; reduceOnly?: boolean;
       closePosition?: boolean; datetime?: string; status?: string;
     }> = [];
-    const symbols = parsed.symbol ? [parsed.symbol] : await collectSymbolsForOrders(ex, book);
-    for (const sym of symbols) {
-      try {
-        const open = (await ex.fetchOpenOrders(sym)) as any[];
+    
+    try {
+      // Если указан символ - запрашиваем только его ордера
+      if (parsed.symbol) {
+        const open = (await ex.fetchOpenOrders(parsed.symbol)) as any[];
         for (const o of open) {
           rows.push({
             id: String(o.id || o.info?.orderId || ""),
-            symbol: sym,
-            kind: isStopOrder(o) ? "STOP" : "LIMIT",
+            symbol: parsed.symbol,
+            kind: isStopOrder(o) ? "STOP" : (isLimitOrder(o) ? "LIMIT" : "MARKET"),
             side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
             qty: Number(o.amount ?? o.info?.origQty ?? 0) || 0,
             price: Number(o.price ?? o.info?.price ?? 0) || undefined,
@@ -157,8 +158,29 @@ export async function runCommand(
             status: String(o.status || o.info?.status || ""),
           });
         }
-      } catch {}
+      } else {
+        // Запрашиваем ВСЕ ордера со всех символов
+        const allOrders = await ex.fetchAllOpenOrdersAcrossSymbols();
+        for (const o of allOrders) {
+          rows.push({
+            id: String(o.orderId || ""),
+            symbol: String(o.symbol || ""),
+            kind: String(o.type || "").toUpperCase().includes("STOP") ? "STOP" : (String(o.type || "").toUpperCase().includes("LIMIT") ? "LIMIT" : "MARKET"),
+            side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
+            qty: Number(o.origQty ?? 0) || 0,
+            price: Number(o.price ?? 0) || undefined,
+            stopPrice: Number(o.stopPrice ?? 0) || undefined,
+            reduceOnly: (o.reduceOnly === true || o.reduceOnly === "true"),
+            closePosition: (o.closePosition === true || o.closePosition === "true"),
+            datetime: o.time ? new Date(o.time).toISOString().slice(0,19).replace("T"," ") : "",
+            status: String(o.status || ""),
+          });
+        }
+      }
+    } catch (e: any) {
+      info(`Ошибка получения ордеров: ${e?.message || e}`);
     }
+    
     rows.sort((a,b)=>{
       if (a.kind !== b.kind) return a.kind === "STOP" ? -1 : 1;
       if (a.symbol !== b.symbol) return a.symbol.localeCompare(b.symbol);
