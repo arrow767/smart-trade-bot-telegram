@@ -5,6 +5,7 @@ import { BinanceFutures } from "../exch/BinanceFutures";
 import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "../core/engine";
 import { banner } from "../core/format";
 import { setDefaultResultOrder } from "dns";
+import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetName, setDefaultPreset } from "../config/trading_config";
 setDefaultResultOrder?.("ipv4first");  // принудительно IPv4 в Node
 
 
@@ -44,14 +45,15 @@ const book = new TaskBook();
 const mainKb = Markup.inlineKeyboard([
   [ Markup.button.callback("📊 Positions", "POS"), Markup.button.callback("💰 Deposit", "DEP") ],
   [ Markup.button.callback("📜 Orders", "ORDERS"), Markup.button.callback("🧰 Tasks", "TASKS") ],
-  [ Markup.button.callback("❌ Cancel All", "CANCEL_ALL"), Markup.button.callback("❓ Help", "HELP") ],
+  [ Markup.button.callback("⚙️ Presets", "PRESETS"), Markup.button.callback("❓ Help", "HELP") ],
+  [ Markup.button.callback("❌ Cancel All", "CANCEL_ALL") ],
 ]);
 
 // Reply keyboard (big buttons near input). Replaces old New trade/Exit set.
 const mainReplyKb = Markup.keyboard([
   [ "📜 Orders", "📊 Positions" ],
   [ "💰 Deposit", "🧰 Tasks" ],
-  [ "❓ Help" ],
+  [ "⚙️ Presets", "❓ Help" ],
 ]).resize();
 
 // Полный help-текст, идентичный консольному "9"
@@ -274,23 +276,375 @@ bot.action("CANCEL_ALL", async (ctx)=>{
   }
 });
 
-// /whoami для whitelisting
-bot.command("whoami", async (ctx)=>{
+// ==============================
+// ✅ НОВОЕ: Управление пресетами
+// ==============================
+
+// State для редактирования (в памяти, упрощённая версия)
+const editState = new Map<number, { preset: string; field: string }>();
+
+// PRESETS: показать список пресетов
+bot.action("PRESETS", async (ctx)=>{
   try {
-    const chatId = Number(ctx.chat?.id ?? ctx.from?.id);
-    const username = ctx.from?.username ? `@${ctx.from.username}` : "(no username)";
-    return ctx.reply(`chatId: <code>${chatId}</code>\nusername: <code>${username}</code>`, { parse_mode: "HTML" });
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    
+    const presets = await listPresets();
+    const defaultPreset = await getDefaultPresetName();
+    
+    if (!presets.length) {
+      await ctx.reply(
+        `<b>⚙️ Пресеты</b>\n\nПресетов пока нет.`,
+        { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]]) }
+      );
+      return;
+    }
+    
+    // Кнопки для каждого пресета
+    const buttons = presets.map(p => [
+      Markup.button.callback(
+        `${p.config_name === defaultPreset ? "⭐ " : ""}${p.config_name}`,
+        `PRESET_SHOW|${p.config_name}`
+      )
+    ]);
+    
+    buttons.push([Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]);
+    buttons.push([Markup.button.callback("« Назад", "BACK_MAIN")]);
+    
+    await ctx.reply(
+      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐ - default пресет`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) }
+    );
   } catch (e:any) {
-    console.error("whoami error:", e);
+    console.error("PRESETS action error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
   }
 });
 
-// Любой текст — пробуем как команду
+// Reply keyboard handler
+bot.hears("⚙️ Presets", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    
+    const presets = await listPresets();
+    const defaultPreset = await getDefaultPresetName();
+    
+    if (!presets.length) {
+      await ctx.reply(
+        `<b>⚙️ Пресеты</b>\n\nПресетов пока нет.`,
+        { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]]) }
+      );
+      return;
+    }
+    
+    const buttons = presets.map(p => [
+      Markup.button.callback(
+        `${p.config_name === defaultPreset ? "⭐ " : ""}${p.config_name}`,
+        `PRESET_SHOW|${p.config_name}`
+      )
+    ]);
+    
+    buttons.push([Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]);
+    
+    await ctx.reply(
+      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐ - default пресет`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) }
+    );
+  } catch (e:any) {
+    console.error("hears Presets error:", e);
+  }
+});
+
+// PRESET_SHOW: показать детали пресета с кнопками редактирования
+bot.action(/PRESET_SHOW\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    
+    const name = ctx.match![1];
+    const preset = await getPreset(name);
+    const defaultPreset = await getDefaultPresetName();
+    const isDefault = name === defaultPreset;
+    
+    const text = [
+      `<b>⚙️ Пресет: ${name}</b>`,
+      isDefault ? `<b>⭐ Default</b>` : "",
+      ``,
+      `<b>Риск:</b> $${preset.trade_risk}`,
+      `<b>Take Profit:</b> ${preset.take_profit.join(", ")}`,
+      `<b>Ratio:</b> ${preset.take_profit_ratio.join(", ")}%`,
+    ].filter(Boolean).join("\n");
+    
+    const buttons = [
+      [Markup.button.callback(`📝 Риск ($${preset.trade_risk})`, `PRESET_EDIT|${name}|risk`)],
+      [Markup.button.callback(`📝 TP (${preset.take_profit.join(",")})`, `PRESET_EDIT|${name}|tp`)],
+      [Markup.button.callback(`📝 Ratio (${preset.take_profit_ratio.join(",")})`, `PRESET_EDIT|${name}|ratio`)],
+      [
+        isDefault 
+          ? Markup.button.callback("⭐ Default", "NOOP")
+          : Markup.button.callback("⭐ Сделать default", `PRESET_DEFAULT|${name}`)
+      ],
+      [
+        Markup.button.callback("🗑 Удалить", `PRESET_DELETE|${name}`),
+        Markup.button.callback("« Назад", "PRESETS")
+      ],
+    ];
+    
+    await ctx.reply(text, { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) });
+  } catch (e:any) {
+    console.error("PRESET_SHOW action error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+  }
+});
+
+// PRESET_EDIT: начать редактирование поля
+bot.action(/PRESET_EDIT\|(.+)\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    
+    const name = ctx.match![1];
+    const field = ctx.match![2];
+    const userId = ctx.from?.id || 0;
+    
+    // Сохраняем state
+    editState.set(userId, { preset: name, field });
+    
+    const fieldLabels: Record<string, string> = {
+      risk: "Риск в USD",
+      tp: "Take Profit (через запятую, например: 0.3,0.5,3)",
+      ratio: "Ratio в % (через запятую, например: 35,30,35)"
+    };
+    
+    await ctx.reply(
+      `<b>✏️ Редактирование пресета "${name}"</b>\n\n` +
+      `<b>${fieldLabels[field] || field}</b>\n\n` +
+      `Введите новое значение:`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« Отмена", `PRESET_SHOW|${name}`)]]) }
+    );
+  } catch (e:any) {
+    console.error("PRESET_EDIT action error:", e);
+  }
+});
+
+// PRESET_DEFAULT: сделать пресет default
+bot.action(/PRESET_DEFAULT\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery("Установлен default");
+    
+    const name = ctx.match![1];
+    await setDefaultPreset(name);
+    
+    // Перезагрузить view
+    await ctx.reply(
+      `✅ Пресет <b>${name}</b> установлен как default`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« К пресетам", "PRESETS")]]) }
+    );
+  } catch (e:any) {
+    console.error("PRESET_DEFAULT action error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+  }
+});
+
+// PRESET_DELETE: удалить пресет
+bot.action(/PRESET_DELETE\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    
+    const name = ctx.match![1];
+    
+    // Подтверждение
+    await ctx.answerCbQuery();
+    await ctx.reply(
+      `<b>🗑 Удалить пресет "${name}"?</b>\n\nЭто действие нельзя отменить.`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard([
+        [Markup.button.callback("✅ Да, удалить", `PRESET_DELETE_CONFIRM|${name}`)],
+        [Markup.button.callback("« Отмена", `PRESET_SHOW|${name}`)]
+      ]) }
+    );
+  } catch (e:any) {
+    console.error("PRESET_DELETE action error:", e);
+  }
+});
+
+// PRESET_DELETE_CONFIRM: подтверждение удаления
+bot.action(/PRESET_DELETE_CONFIRM\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery("Удалено");
+    
+    const name = ctx.match![1];
+    await deletePreset(name);
+    
+    await ctx.reply(
+      `✅ Пресет <b>${name}</b> удалён`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« К пресетам", "PRESETS")]]) }
+    );
+  } catch (e:any) {
+    console.error("PRESET_DELETE_CONFIRM action error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+  }
+});
+
+// PRESET_ADD: добавить новый пресет
+bot.action("PRESET_ADD", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    
+    const userId = ctx.from?.id || 0;
+    editState.set(userId, { preset: "__new__", field: "name" });
+    
+    await ctx.reply(
+      `<b>➕ Добавить новый пресет</b>\n\n` +
+      `Введите имя пресета (например: <code>15m</code>, <code>1h</code>):`,
+      { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« Отмена", "PRESETS")]]) }
+    );
+  } catch (e:any) {
+    console.error("PRESET_ADD action error:", e);
+  }
+});
+
+// BACK_MAIN: вернуться в главное меню
+bot.action("BACK_MAIN", async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    await ctx.reply(`Главное меню:`, { ...mainKb });
+  } catch (e:any) {
+    console.error("BACK_MAIN action error:", e);
+  }
+});
+
+// NOOP: ничего не делать (для disabled кнопок)
+bot.action("NOOP", async (ctx)=>{
+  try {
+    await ctx.answerCbQuery();
+  } catch {}
+});
+
+// ==============================
+// Обработка текста для редактирования
+// ==============================
+
+// Перехватываем текст если идёт редактирование
 bot.on("text", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     const text = (ctx.message?.text ?? "").trim();
     if (!text) return;
+    
+    const userId = ctx.from?.id || 0;
+    const state = editState.get(userId);
+    
+    // ✅ Если идёт редактирование пресета — обработать
+    if (state) {
+      if (state.preset === "__new__" && state.field === "name") {
+        // Создание нового пресета
+        const name = text;
+        
+        // Валидация имени
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          return ctx.reply(
+            `❌ Имя должно содержать только буквы, цифры, _ и -\n\nПопробуйте ещё раз:`,
+            { parse_mode:"HTML" }
+          );
+        }
+        
+        // Проверяем существует ли
+        try {
+          await getPreset(name);
+          return ctx.reply(
+            `❌ Пресет <b>${name}</b> уже существует\n\nВыберите другое имя:`,
+            { parse_mode:"HTML" }
+          );
+        } catch {
+          // Пресет не существует — ОК
+        }
+        
+        // Создаём с дефолтными значениями
+        await upsertPreset({
+          config_name: name,
+          trade_risk: 100,
+          take_profit: [3, 5, 7],
+          take_profit_ratio: [35, 30, 35]
+        });
+        
+        editState.delete(userId);
+        
+        await ctx.reply(
+          `✅ Пресет <b>${name}</b> создан\n\n` +
+          `Риск: $100\nTP: 3, 5, 7\nRatio: 35%, 30%, 35%\n\n` +
+          `Теперь вы можете отредактировать параметры:`,
+          { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback(`📝 Редактировать ${name}`, `PRESET_SHOW|${name}`)]]) }
+        );
+        return;
+      }
+      
+      // Редактирование существующего пресета
+      const { preset: name, field } = state;
+      const current = await getPreset(name);
+      
+      if (field === "risk") {
+        const risk = Number(text);
+        if (isNaN(risk) || risk <= 0) {
+          return ctx.reply(`❌ Риск должен быть положительным числом\n\nПопробуйте ещё раз:`, { parse_mode:"HTML" });
+        }
+        
+        await upsertPreset({ ...current, trade_risk: risk });
+        editState.delete(userId);
+        
+        await ctx.reply(
+          `✅ Риск обновлён: <b>$${risk}</b>`,
+          { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback(`« К ${name}`, `PRESET_SHOW|${name}`)]]) }
+        );
+        return;
+      }
+      
+      if (field === "tp") {
+        const values = text.split(",").map(v => Number(v.trim())).filter(v => !isNaN(v));
+        if (values.length === 0) {
+          return ctx.reply(`❌ Введите числа через запятую\n\nПример: 0.3,0.5,3`, { parse_mode:"HTML" });
+        }
+        
+        await upsertPreset({ ...current, take_profit: values });
+        editState.delete(userId);
+        
+        await ctx.reply(
+          `✅ Take Profit обновлён: <b>${values.join(", ")}</b>`,
+          { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback(`« К ${name}`, `PRESET_SHOW|${name}`)]]) }
+        );
+        return;
+      }
+      
+      if (field === "ratio") {
+        const values = text.split(",").map(v => Number(v.trim())).filter(v => !isNaN(v));
+        if (values.length === 0) {
+          return ctx.reply(`❌ Введите числа через запятую\n\nПример: 35,30,35`, { parse_mode:"HTML" });
+        }
+        
+        // Проверка что сумма = 100
+        const sum = values.reduce((a, b) => a + b, 0);
+        if (Math.abs(sum - 100) > 0.1) {
+          return ctx.reply(
+            `❌ Сумма ratio должна быть 100%\n\nТекущая сумма: ${sum}%\n\nПопробуйте ещё раз:`,
+            { parse_mode:"HTML" }
+          );
+        }
+        
+        await upsertPreset({ ...current, take_profit_ratio: values });
+        editState.delete(userId);
+        
+        await ctx.reply(
+          `✅ Ratio обновлён: <b>${values.join(", ")}%</b>`,
+          { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback(`« К ${name}`, `PRESET_SHOW|${name}`)]]) }
+        );
+        return;
+      }
+    }
+
+    // ✅ Если НЕ редактируем пресет — обычная обработка команд
 
     // быстрые цифры
     if (/^[0-9]$/.test(text)) {
@@ -318,6 +672,17 @@ bot.on("text", async (ctx)=>{
     try {
       await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
     } catch {}
+  }
+});
+
+// /whoami для whitelisting
+bot.command("whoami", async (ctx)=>{
+  try {
+    const chatId = Number(ctx.chat?.id ?? ctx.from?.id);
+    const username = ctx.from?.username ? `@${ctx.from.username}` : "(no username)";
+    return ctx.reply(`chatId: <code>${chatId}</code>\nusername: <code>${username}</code>`, { parse_mode: "HTML" });
+  } catch (e:any) {
+    console.error("whoami error:", e);
   }
 });
 
