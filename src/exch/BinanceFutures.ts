@@ -101,6 +101,13 @@ export class BinanceFutures {
     } as any);
   }
 
+  // ——— Инициализация: синхронизация времени перед первым использованием ———
+  async init() {
+    console.log("🔄 Синхронизация времени с Binance...");
+    await this.syncServerTime(true);
+    console.log("✅ Синхронизация завершена");
+  }
+
   // ——— общая проверка наличия ключей перед приватными вызовами ———
   private ensureKeysOrThrow() {
     if (!this.apiKey || !this.secret) {

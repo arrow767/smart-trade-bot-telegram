@@ -693,7 +693,11 @@ bot.catch(async (err, ctx) => {
   } catch {}
 });
 
-bot.launch().then(()=> console.log("Telegram bot started.")).catch((e)=>{ console.error(e); });
+bot.launch().then(async ()=> {
+  await ex.init(); // Синхронизация времени перед первым использованием
+  await ex.loadMarkets();
+  console.log("Telegram bot started.");
+}).catch((e)=>{ console.error(e); });
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
 

@@ -6,7 +6,9 @@ import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "./core/engine";
 import { banner } from "./core/format";
 
 async function main(){
-  const ex = new BinanceFutures(); await ex.loadMarkets();
+  const ex = new BinanceFutures();
+  await ex.init(); // Синхронизация времени перед первым запросом
+  await ex.loadMarkets();
   const book = new TaskBook();
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
 
