@@ -153,11 +153,16 @@ export class BinanceFutures {
       const localTs = Date.now();
 
       if (Number.isFinite(serverTs) && serverTs > 0) {
-        // положительное — локальные часы спешат
-        this.timeSkewMs = localTs - serverTs;
-        // ccxt binance читает difference из этого поля
-        (this.fapi as any).timeDifference = -this.timeSkewMs;
-        console.log(`⏱️ Time sync: local=${localTs}, server=${serverTs}, skew=${this.timeSkewMs}ms`);
+        // Разница: server - local
+        // Если положительная — локальные часы отстают, если отрицательная — спешат
+        const diff = serverTs - localTs;
+        this.timeSkewMs = -diff; // храним как local - server для удобства
+        
+        // CCXT добавляет timeDifference к локальному timestamp при запросе
+        // Если local спешит на 5000ms, нужно вычесть 5000 → timeDifference = -5000
+        (this.fapi as any).timeDifference = diff;
+        
+        console.log(`⏱️ Time sync: local=${localTs}, server=${serverTs}, diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
       }
     } catch (err: any) {
       console.warn(`⚠️ syncServerTime error:`, err?.message || err);
