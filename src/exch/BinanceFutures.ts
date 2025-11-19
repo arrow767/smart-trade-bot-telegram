@@ -162,7 +162,10 @@ export class BinanceFutures {
         // Если local спешит на 5000ms, нужно вычесть 5000 → timeDifference = -5000
         (this.fapi as any).timeDifference = diff;
         
-        console.log(`⏱️ Time sync: local=${localTs}, server=${serverTs}, diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
+        // Логируем только при большой разнице или принудительной синхронизации
+        if (force || Math.abs(diff) > 1000) {
+          console.log(`⏱️ Time sync: diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
+        }
       }
     } catch (err: any) {
       console.warn(`⚠️ syncServerTime error:`, err?.message || err);
