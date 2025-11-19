@@ -553,14 +553,12 @@ bot.on("text", async (ctx)=>{
         }
         
         // Проверяем существует ли
-        try {
-          await getPreset(name);
+        const allNames = (await listPresets()).map(p => p.config_name);
+        if (allNames.includes(name)) {
           return ctx.reply(
             `❌ Пресет <b>${name}</b> уже существует\n\nВыберите другое имя:`,
             { parse_mode:"HTML" }
           );
-        } catch {
-          // Пресет не существует — ОК
         }
         
         // Создаём с дефолтными значениями
