@@ -88,3 +88,38 @@ export function calcDesiredSLByRiskUsd(
   return side === "long" ? (entryAvg - perContractLoss) : (entryAvg + perContractLoss);
 }
 
+/**
+ * ✅ НОВОЕ: Проверка, является ли цена "лимитной" (не исполнится немедленно)
+ * - long: limitPrice должна быть < currentPrice
+ * - short: limitPrice должна быть > currentPrice
+ */
+export function isValidLimitPrice(side: "long" | "short", limitPrice: number, currentPrice: number): boolean {
+  return side === "long" ? limitPrice < currentPrice : limitPrice > currentPrice;
+}
+
+/**
+ * ✅ НОВОЕ: Безопасное размещение отложки (никогда не исполняется как market)
+ * Возвращает тип ордера и safe цену
+ */
+export function safeEntryOrderType(
+  side: "long" | "short",
+  desiredPrice: number,
+  currentPrice: number,
+  tickSize: number
+): { type: "LIMIT" | "STOP_MARKET"; safePrice: number } {
+  const isLimit = isValidLimitPrice(side, desiredPrice, currentPrice);
+  
+  if (isLimit) {
+    // LIMIT: безопасно, цена на правильной стороне
+    return { type: "LIMIT", safePrice: desiredPrice };
+  } else {
+    // Отложка за текущей ценой → STOP_MARKET
+    // Добавляем минимальный буфер чтобы точно не сработало сразу
+    const buffer = tickSize * 2;
+    const safePrice = side === "long" 
+      ? Math.max(desiredPrice, currentPrice + buffer)
+      : Math.min(desiredPrice, currentPrice - buffer);
+    return { type: "STOP_MARKET", safePrice };
+  }
+}
+

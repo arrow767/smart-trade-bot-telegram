@@ -19,6 +19,29 @@ export class TaskBook {
     this.load();
     // восстановим последовательность идентификаторов
     for (const id of this.tasks.keys()) TASK_ID_SEQ = Math.max(TASK_ID_SEQ, id + 1);
+    
+    // ✅ НОВОЕ: Автоочистка старых tasks со status=error
+    this.cleanupOldErrorTasks();
+  }
+
+  /** ✅ НОВОЕ: Очистка tasks со status=error старше AUTO_CLEANUP_DAYS дней */
+  private cleanupOldErrorTasks() {
+    const AUTO_CLEANUP_DAYS = Number(process.env.AUTO_CLEANUP_ERROR_TASKS_DAYS || 3);
+    const now = Date.now();
+    const cutoff = now - AUTO_CLEANUP_DAYS * 24 * 60 * 60 * 1000;
+    
+    let removed = 0;
+    for (const [id, task] of this.tasks.entries()) {
+      if (task.status === "error" && task.updatedAt && task.updatedAt.getTime() < cutoff) {
+        this.tasks.delete(id);
+        removed++;
+      }
+    }
+    
+    if (removed > 0) {
+      console.log(`🧹 Автоочистка: удалено ${removed} старых tasks со status=error (>${AUTO_CLEANUP_DAYS} дней)`);
+      this.save();
+    }
   }
 
   private save() {
@@ -117,6 +140,59 @@ export class TaskBook {
   remove(id: number) {
     this.tasks.delete(id);
     this.save();
+  }
+
+  /** ✅ НОВОЕ: Получить все задачи по символу */
+  getBySymbol(symbolCcxt: string): Task[] {
+    return Array.from(this.tasks.values()).filter(t => t.symbolCcxt === symbolCcxt);
+  }
+
+  /** ✅ НОВОЕ: Получить все входные ордера по символу (для всех задач) */
+  getAllEntryOrderIdsBySymbol(symbolCcxt: string): Set<string> {
+    const all = new Set<string>();
+    for (const t of this.tasks.values()) {
+      if (t.symbolCcxt === symbolCcxt && t.entryOrderIds) {
+        t.entryOrderIds.forEach(id => all.add(id));
+      }
+    }
+    return all;
+  }
+
+  /** 
+   * ✅ НОВОЕ: Проверка и удаление висячих tasks (отложки пропали, позиции нет).
+   * Вызывается периодически из фонового обработчика.
+   * @param ex - биржевой клиент для проверки ордеров и позиций
+   * @param symbolCcxt - символ для проверки
+   * @param minQty - минимальный размер позиции
+   */
+  async cleanupOrphanTasks(
+    ex: any, 
+    symbolCcxt: string, 
+    minQty: number,
+    log: (msg: string) => void
+  ) {
+    const tasks = this.getBySymbol(symbolCcxt);
+    if (!tasks.length) return;
+
+    try {
+      const openOrders = await ex.fetchOpenOrders(symbolCcxt);
+      const openIds = new Set(openOrders.map((o: any) => String(o.id || "")));
+      const posSize = Math.abs(await ex.fetchPositionSize(symbolCcxt));
+      const flat = posSize < Math.max(minQty * 0.5, 1e-12);
+
+      for (const task of tasks) {
+        // Пропускаем задачи в статусе "live" или если есть активные входные ордера
+        if (task.status === "live" || task.status === "done" || task.status === "canceled") continue;
+        
+        const hasEntryOrders = (task.entryOrderIds || []).some(id => openIds.has(id));
+        
+        // Если нет входных ордеров на бирже и позиция flat → удаляем task
+        if (!hasEntryOrders && flat) {
+          log(`🧹 Висячая задача #${task.id} (${symbolCcxt}): отложек нет, позиции нет → удаляю`);
+          this.remove(task.id);
+        }
+      }
+    } catch {}
   }
 }
 

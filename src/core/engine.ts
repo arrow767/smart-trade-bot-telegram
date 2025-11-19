@@ -42,7 +42,8 @@ import {
   computeQtyForUsdSmart,
   wouldStopImmediatelyTrigger,
   adjustStopForMark,
-  calcDesiredSLByRiskUsd
+  calcDesiredSLByRiskUsd,
+  safeEntryOrderType
 } from "./TradingUtils";
 import { buildHelp } from "./HelpText";
 import { parseLine } from "./CommandParser";
@@ -55,6 +56,13 @@ export type { ParsedCmd } from "./types";
 // Флаг: фиксировать риск после завершения набора позиции (env)
 const RISK_LOCK_AFTER_FILL = String(process.env.RISK_LOCK_AFTER_FILL || "").toLowerCase() === "1"
   || String(process.env.RISK_LOCK_AFTER_FILL || "").toLowerCase() === "true";
+
+// ✅ НОВОЕ: Максимальная дальность отложек от текущей цены (в %)
+// Если отложка дальше, чем MAX_ENTRY_DISTANCE_PCT% от текущей цены — предупреждаем
+const MAX_ENTRY_DISTANCE_PCT = Number(process.env.MAX_ENTRY_DISTANCE_PCT || 15); // по умолчанию 15%
+
+// ✅ НОВОЕ: Автоочистка tasks со status=error старше N дней
+const AUTO_CLEANUP_ERROR_TASKS_DAYS = Number(process.env.AUTO_CLEANUP_ERROR_TASKS_DAYS || 3);
 
 export async function runCommand(
   ex: BinanceFutures,
@@ -73,16 +81,27 @@ export async function runCommand(
   const ENV_CAP_USD = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
   const ALIGN_TO_CURRENT_LEV = String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "1" || String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "true";
   let tierCapUsdForAlign: number | undefined;
+  
+  // ✅ УЛУЧШЕНО: calcBoundsUsd теперь учитывает minNotional корректно
   function calcBoundsUsd(price: number) {
     const f: any = ex.getSymbolFilters(symbolCcxt) as any;
-    const minUsd = Math.max((Number(f.minQty) || 0) * price, Number(f.minNotional) || 0);
-    const maxUsdFilter = (f.maxQty ? Number(f.maxQty) * price : Infinity);
+    const minQtyUsd = (Number(f.minQty) || 0) * price;
+    const minNotional = Number(f.minNotional) || 0;
+    
+    // minUsd = максимум из minQty*price и minNotional
+    const minUsd = Math.max(minQtyUsd, minNotional);
+    
+    const maxQtyUsd = f.maxQty ? Number(f.maxQty) * price : Infinity;
     const envCap = ENV_CAP_USD > 0 ? ENV_CAP_USD : Infinity;
-    let maxUsd = Math.min(envCap, Number.isFinite(maxUsdFilter) && maxUsdFilter > 0 ? maxUsdFilter : Infinity);
+    
+    let maxUsd = Math.min(envCap, Number.isFinite(maxQtyUsd) && maxQtyUsd > 0 ? maxQtyUsd : Infinity);
+    
+    // ✅ НОВОЕ: если включен режим выравнивания по плечу — учитываем notionalCap
     if (ALIGN_TO_CURRENT_LEV && Number.isFinite(tierCapUsdForAlign as number)) {
       maxUsd = Math.min(maxUsd, tierCapUsdForAlign as number);
     }
-    return { minUsd, maxUsd: Number.isFinite(maxUsd) ? maxUsd : envCap };
+    
+    return { minUsd, maxUsd: Number.isFinite(maxUsd) ? maxUsd : (envCap > 0 ? envCap : Infinity) };
   }
   const splitLegsByUsd = (legsIn: TradeLeg[]): TradeLeg[] => {
     const out: TradeLeg[] = [];
@@ -122,7 +141,7 @@ export async function runCommand(
     const symbols = parsed.symbol ? [parsed.symbol] : await collectSymbolsForOrders(ex, book);
     for (const sym of symbols) {
       try {
-        const open = await ex.fetchOpenOrders(sym);
+        const open = (await ex.fetchOpenOrders(sym)) as any[];
         for (const o of open) {
           rows.push({
             id: String(o.id || o.info?.orderId || ""),
@@ -172,8 +191,8 @@ export async function runCommand(
   if (parsed.kind === "cancel_limit_symbol" || parsed.kind === "cancel_stop_symbol") {
     const sym = parsed.symbol;
     try {
-      const open = await ex.fetchOpenOrders(sym);
-      const toCancel = open.filter(o => parsed.kind === "cancel_limit_symbol" ? isLimitOrder(o) : isStopOrder(o));
+      const open = (await ex.fetchOpenOrders(sym)) as any[];
+      const toCancel = open.filter((o: any) => parsed.kind === "cancel_limit_symbol" ? isLimitOrder(o) : isStopOrder(o));
       for (const o of toCancel) { try { await ex.cancelOrder(sym, String(o.id)); } catch {} }
       info(
         mode === "console"
@@ -193,8 +212,8 @@ export async function runCommand(
     let total = 0;
     for (const sym of symbols) {
       try {
-        const open = await ex.fetchOpenOrders(sym);
-        const toCancel = open.filter(o => {
+        const open = (await ex.fetchOpenOrders(sym)) as any[];
+        const toCancel = open.filter((o: any) => {
           if (modeSub === "all") return true;
           if (modeSub === "limit") return isLimitOrder(o);
           return isStopOrder(o);
@@ -395,7 +414,7 @@ export async function runCommand(
     let plannedQty = 0;
     try {
       if (t.entryOrderIds && t.entryOrderIds.length) {
-        const open = await ex.fetchOpenOrders(t.symbolCcxt);
+        const open = (await ex.fetchOpenOrders(t.symbolCcxt)) as any[];
         for (const o of open) {
           if (!o.id || !t.entryOrderIds.includes(o.id)) continue;
           const qty = Number(o.amount ?? o.info?.origQty ?? 0) || undefined;
@@ -459,8 +478,8 @@ export async function runCommand(
     const tick = await ex.fetchTicker(symbolCcxt);
     const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
 
-    const open = await ex.fetchOpenOrders(symbolCcxt);
-    const openIds = new Set(open.filter((o) => o.id).map((o) => o.id as string));
+    const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+    const openIds = new Set(open.filter((o: any) => o.id).map((o: any) => o.id as string));
     const openEntryIdsOrdered = entryIds.filter((id) => openIds.has(id));
 
     const results: string[] = [];
@@ -489,7 +508,10 @@ export async function runCommand(
         continue;
       }
 
-      let isLimit = (parsed.dir === "l" ? leg.price < mark : leg.price > mark);
+      // ✅ КРИТИЧНО: Безопасное определение типа ордера
+      const filters = ex.getSymbolFilters(symbolCcxt);
+      const orderMeta = safeEntryOrderType(parsed.dir === "l" ? "long" : "short", leg.price, mark, filters.tickSize);
+      const safePrice = Number(ex.priceToPrecision(symbolCcxt, orderMeta.safePrice));
 
       let replacedId: string | undefined;
       if (i < openEntryIdsOrdered.length) {
@@ -499,22 +521,24 @@ export async function runCommand(
 
       let newId: string | undefined;
       try {
-        if (!isLimit && wouldStopImmediatelyTrigger(parsed.dir === "l" ? "long" : "short", leg.price, mark)) {
-          isLimit = true;
-        }
-        if (isLimit) {
-          const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
+        if (orderMeta.type === "LIMIT") {
+          const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, safePrice);
           newId = o.id!;
         } else {
-          const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, stopPx);
+          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, safePrice);
           newId = o.id!;
         }
-      } catch {
-        const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, px);
-        newId = o.id!;
+      } catch (err: any) {
+        // Fallback только если безопасно
+        const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, leg.price));
+        const isSafe = (parsed.dir === "l" ? fallbackPrice < mark : fallbackPrice > mark);
+        if (isSafe) {
+          const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, fallbackPrice);
+          newId = o.id!;
+        } else {
+          results.push(`error @ ${leg.price}: ${err.message}`);
+          continue;
+        }
       }
 
       if (replacedId) {
@@ -526,7 +550,7 @@ export async function runCommand(
 
       results.push(
         `${replacedId ? `replace ${replacedId} → ${newId}` : `add ${newId}`} (~${(pick.qty).toFixed(5)
-        } @ ${leg.price}, ≈ $${pick.usdActual.toFixed(2)} к цели $${leg.usd.toFixed(2)})`
+        } @ ${safePrice}, ≈ $${pick.usdActual.toFixed(2)} к цели $${leg.usd.toFixed(2)})`
       );
     }
 
@@ -673,7 +697,7 @@ export async function runCommand(
   }
 
   // ======= LIMIT/STOP МНОГОНОЖЕВАЯ ЛОГИКА =======
-  const totalUsd = legs.reduce((a, l) => a + l.usd, 0);
+  const totalUsd = legs.reduce((a: number, l: TradeLeg) => a + l.usd, 0);
   const first = legs[0];
 
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
@@ -739,28 +763,38 @@ export async function runCommand(
       continue;
     }
 
-    const isLimitLeg = side === "long" ? leg.price < markPrice : leg.price > markPrice;
+    // ✅ НОВОЕ: Проверяем дальность отложки
+    const distancePct = Math.abs((leg.price - markPrice) / markPrice) * 100;
+    if (distancePct > MAX_ENTRY_DISTANCE_PCT) {
+      info(`⚠️ Отложка $${leg.usd.toFixed(2)} @ ${leg.price} слишком далеко от текущей цены ${markPrice.toFixed(2)} (${distancePct.toFixed(1)}% > ${MAX_ENTRY_DISTANCE_PCT}%)`);
+    }
+
+    // ✅ КРИТИЧНО: Безопасное определение типа ордера (НИКОГДА не market!)
+    const filters = ex.getSymbolFilters(symbolCcxt);
+    const orderMeta = safeEntryOrderType(side, leg.price, markPrice, filters.tickSize);
+    const safePrice = Number(ex.priceToPrecision(symbolCcxt, orderMeta.safePrice));
+
     try {
-      if (isLimitLeg) {
-        const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
+      if (orderMeta.type === "LIMIT") {
+        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, safePrice);
         entryIds.push(o.id!);
+        info(`➕ LIMIT вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
       } else {
-        const stopPx = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-        if (wouldStopImmediatelyTrigger(side, stopPx, markPrice)) {
-          const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-          const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
-          entryIds.push(o.id!);
-        } else {
-          const o = await ex.createStopMarketEntry(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, stopPx);
-          entryIds.push(o.id!);
-        }
+        const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, safePrice);
+        entryIds.push(o.id!);
+        info(`➕ STOP вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
       }
-      info(`➕ Вход: ~${(pick.qty).toFixed(5)} @ ${leg.price} (≈ $${pick.usdActual.toFixed(2)} к цели $${leg.usd.toFixed(2)})`);
-    } catch {
-      const px = Number(ex.priceToPrecision(symbolCcxt, leg.price));
-      const o = await ex.createLimit(symbolCcxt, (side === "long" ? "buy" : "sell") as any, pick.qty, px);
-      entryIds.push(o.id!);
+    } catch (err: any) {
+      // При ошибке — пытаемся LIMIT как fallback (но только если цена безопасна!)
+      const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, leg.price));
+      const isSafe = (side === "long" ? fallbackPrice < markPrice : fallbackPrice > markPrice);
+      if (isSafe) {
+        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, fallbackPrice);
+        entryIds.push(o.id!);
+        info(`➕ LIMIT вход (fallback): ~${(pick.qty).toFixed(5)} @ ${fallbackPrice}`);
+      } else {
+        throw new Error(`Не удалось разместить отложку для $${leg.usd} @ ${leg.price}: ${err.message}`);
+      }
     }
   }
 
@@ -782,10 +816,15 @@ export async function runCommand(
       let lastAvg = 0;
       let tpsPlaced = false;
       let slPxCurrent: number | undefined;
+      const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
 
       // НОВОЕ: учёт исчезнувших входов с задержкой-подтверждением
       const MANUAL_GONE_GRACE_MS = 4000;
       const gone = new Map<string, { ts: number; sizeOnGone: number }>();
+      
+      // ✅ НОВОЕ: Периодическая очистка висячих tasks (каждые 30 сек)
+      let lastCleanupTs = Date.now();
+      const CLEANUP_INTERVAL_MS = 30_000;
 
       for (;;) {
         if (book.get(task.id)?.cancelRequested) {
@@ -797,6 +836,14 @@ export async function runCommand(
           return;
         }
 
+        // ✅ НОВОЕ: Периодическая очистка висячих tasks
+        const now = Date.now();
+        if (now - lastCleanupTs > CLEANUP_INTERVAL_MS) {
+          const filters = ex.getSymbolFilters(symbolCcxt);
+          await book.cleanupOrphanTasks(ex, symbolCcxt, filters.minQty, info).catch(() => {});
+          lastCleanupTs = now;
+        }
+
         const tick = await ex.fetchTicker(symbolCcxt);
         const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
 
@@ -805,12 +852,12 @@ export async function runCommand(
         const posSize = Math.abs(my?.contracts ?? 0);
         const entryAvg = Number(my?.entryPrice ?? 0) || 0;
 
-        const open = await ex.fetchOpenOrders(symbolCcxt);
-        const entriesLeft = open.filter((o) => o.id && keep.has(o.id)).length;
+        const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+        const entriesLeft = open.filter((o: any) => o.id && keep.has(o.id)).length;
 
         // === Исправлено: надёжное определение «снято вручную» ===
         for (const id of [...keep]) {
-          const exists = open.some((o) => o.id === id);
+          const exists = open.some((o: any) => o.id === id);
           if (exists) {
             gone.delete(id);
             continue;
@@ -855,18 +902,27 @@ export async function runCommand(
         }
 
         // ✅ НОВЫЙ чек: если мы вне позиции и ВСЕ входные отложки этой задачи сняты — удаляем задачу
+        // НО: учитываем, что могут быть другие задачи на этот же символ!
         {
           const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const flat = posSize < Math.max(minQty * 0.5, 1e-12);
           if (flat && keep.size === 0) {
-            // Ничего дополнительно не отменяем, чтобы не конфликтовать с другими задачами по этому же символу
-            book.remove(task.id);
-            info(
-              mode === "console"
-                ? `🧹 Все входные заявки сняты вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
-                : `<b>🧹 Все входные заявки сняты вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
+            // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
+            const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
+            const otherHasActiveEntries = otherTasks.some(t => 
+              (t.entryOrderIds || []).some(id => open.some((o: any) => o.id === id))
             );
-            return;
+            
+            if (!otherHasActiveEntries) {
+              // Только если у других задач тоже нет активных входов — удаляем
+              book.remove(task.id);
+              info(
+                mode === "console"
+                  ? `🧹 Все входные заявки сняты вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
+                  : `<b>🧹 Все входные заявки сняты вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
+              );
+              return;
+            }
           }
         }
 
@@ -908,7 +964,8 @@ export async function runCommand(
               const q = tpQtys[i];
               if (q <= 0) continue;
               const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-              await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
+              const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
+              if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
             }
             tpsPlaced = true;
           }
@@ -943,13 +1000,11 @@ export async function runCommand(
           const closed = -delta;
           let tpNo: number | undefined;
           try {
-            const current = await ex.fetchOpenOrders(symbolCcxt);
-            const openIds = new Set(current.map(o=>String(o.id||"")));
-            // tpIndexById может отсутствовать в этой ветке — создадим локально, если нет
-            // (безопасно: просто не будет номера)
-            const map = (typeof tpIndexById !== "undefined" ? tpIndexById : new Map<string, number>());
-            const gone = Array.from(map.entries()).filter(([id])=>!openIds.has(id)).map(([,idx])=>idx);
-            if (gone.length) tpNo = Math.min(...gone);
+            const current = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+            const openIds = new Set(current.map((o: any) => String(o.id || "")));
+            const map = tpIndexById;
+            const goneIds = Array.from(map.entries()).filter(([id]) => !openIds.has(id)).map(([, idx]) => idx);
+            if (goneIds.length) tpNo = Math.min(...goneIds);
           } catch {}
           const tpTag = tpNo ? `TP${tpNo}` : `TP`;
           info(mode === "console" ? `${tpTag}/выход: -${closed.toFixed(5)} по ${symbolCcxt}` : `<b>${tpTag}/выход</b>: −${closed.toFixed(5)} по <code>${symbolCcxt}</code>`);
@@ -974,20 +1029,35 @@ export async function runCommand(
               const q = tpQtys[i];
               if (q <= 0) continue;
               const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-              await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+              const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+              if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
             }
             tpsPlaced = true;
           } catch {}
         }
 
-        const nonEntryOpen = open.filter((o) => !(o.id && keep.has(o.id)));
-        if (posSize < 1e-12 && keep.size === 0 && nonEntryOpen.length === 0) {
-          book.remove(task.id);
-          break;
+        // ✅ ИСПРАВЛЕНО: Финальная проверка завершения задачи (учитываем другие задачи на символ)
+        const nonEntryOpen = open.filter((o: any) => !(o.id && keep.has(o.id)));
+        if (posSize < 1e-12 && keep.size === 0) {
+          // Проверяем, есть ли другие задачи с активными входами на этот символ
+          const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
+          const otherHasActiveOrders = otherTasks.some(t => 
+            (t.entryOrderIds || []).some(id => open.some((o: any) => o.id === id))
+          );
+          
+          // Удаляем задачу только если:
+          // 1. Позиция flat
+          // 2. У этой задачи нет входных ордеров
+          // 3. У других задач на этот символ тоже нет активных входов
+          // 4. Нет никаких других открытых ордеров (TP/SL)
+          if (!otherHasActiveOrders && nonEntryOpen.length === 0) {
+            book.remove(task.id);
+            break;
+          }
         }
 
         for (const id of [...keep]) {
-          if (!open.find((o) => o.id === id)) keep.delete(id);
+          if (!open.find((o: any) => o.id === id)) keep.delete(id);
         }
 
         await new Promise((r) => setTimeout(r, 1200));

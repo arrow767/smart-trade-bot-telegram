@@ -1,1 +1,112 @@
-[]
+[
+  {
+    "id": 8,
+    "symbolCcxt": "XRP/USDT:USDT",
+    "label": "LONG multi 1 legs (Σ$200)",
+    "status": "live",
+    "startedAt": "2025-10-27T11:27:32.554Z",
+    "updatedAt": "2025-10-27T11:28:04.628Z",
+    "entryOrderIds": [
+      "126953160240"
+    ],
+    "cancelRequested": false,
+    "side": "long",
+    "totalUsd": 200,
+    "presetName": "4h"
+  },
+  {
+    "id": 11,
+    "symbolCcxt": "VIRTUAL/USDT:USDT",
+    "label": "LONG multi 1 legs (Σ$100)",
+    "status": "live",
+    "startedAt": "2025-10-27T12:14:59.124Z",
+    "updatedAt": "2025-10-27T12:15:26.258Z",
+    "entryOrderIds": [
+      "5090674739"
+    ],
+    "cancelRequested": false,
+    "side": "long",
+    "totalUsd": 100,
+    "presetName": "4h"
+  },
+  {
+    "id": 12,
+    "symbolCcxt": "VIRTUAL/USDT:USDT",
+    "label": "SHORT multi 1 legs (Σ$100)",
+    "status": "filled",
+    "startedAt": "2025-10-27T12:15:17.589Z",
+    "updatedAt": "2025-10-27T12:15:23.401Z",
+    "entryOrderIds": [
+      "5090681755"
+    ],
+    "cancelRequested": false,
+    "side": "short",
+    "totalUsd": 100,
+    "presetName": "4h"
+  },
+  {
+    "id": 13,
+    "symbolCcxt": "XRP/USDT:USDT",
+    "label": "LONG multi 2 legs (Σ$400)",
+    "status": "waiting_fill",
+    "error": "slPxCurrent is not defined",
+    "startedAt": "2025-10-30T20:22:53.096Z",
+    "updatedAt": "2025-10-30T20:23:09.671Z",
+    "entryOrderIds": [
+      "127456066548",
+      "127456066941"
+    ],
+    "cancelRequested": false,
+    "side": "long",
+    "totalUsd": 400,
+    "presetName": "4h"
+  },
+  {
+    "id": 14,
+    "symbolCcxt": "XRP/USDT:USDT",
+    "label": "LONG multi 2 legs (Σ$200)",
+    "status": "waiting_fill",
+    "startedAt": "2025-10-30T20:23:57.049Z",
+    "updatedAt": "2025-10-30T20:23:57.050Z",
+    "entryOrderIds": [
+      "127456197938",
+      "127456198782"
+    ],
+    "cancelRequested": false,
+    "side": "long",
+    "totalUsd": 200,
+    "presetName": "4h"
+  },
+  {
+    "id": 15,
+    "symbolCcxt": "XRP/USDT:USDT",
+    "label": "SHORT multi 2 legs (Σ$300)",
+    "status": "waiting_fill",
+    "startedAt": "2025-10-31T17:48:28.692Z",
+    "updatedAt": "2025-10-31T17:48:28.694Z",
+    "entryOrderIds": [
+      "127565517423",
+      "127565517822"
+    ],
+    "cancelRequested": false,
+    "side": "short",
+    "totalUsd": 300,
+    "presetName": "4h"
+  },
+  {
+    "id": 16,
+    "symbolCcxt": "ZEC/USDT:USDT",
+    "label": "LONG multi 2 legs (Σ$200)",
+    "status": "waiting_fill",
+    "startedAt": "2025-10-31T17:58:20.555Z",
+    "updatedAt": "2025-10-31T17:58:20.557Z",
+    "entryOrderIds": [
+      "792669835230",
+      "792669835861"
+    ],
+    "cancelRequested": false,
+    "side": "long",
+    "totalUsd": 200,
+    "presetName": "4h"
+  }
+]
