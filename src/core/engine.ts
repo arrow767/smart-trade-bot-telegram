@@ -574,8 +574,13 @@ export async function runCommand(
 
   const preset = await getPreset(presetName);
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
-  ex.loadMarkets && (await ex.loadMarkets().catch(() => {}));
-  ex.market(symbolCcxt);
+  
+  // ✅ ИСПРАВЛЕНО: используем marketSafe() с автоматической перезагрузкой
+  try {
+    await ex.marketSafe(symbolCcxt);
+  } catch (err: any) {
+    throw new Error(`Символ ${symbolCcxt} не найден на бирже. Возможно, он был делистнут или ещё не доступен.`);
+  }
 
   const t0 = await ex.fetchTicker(symbolCcxt);
   let markPrice = Number(t0.last ?? t0.mark ?? t0.info?.markPrice);

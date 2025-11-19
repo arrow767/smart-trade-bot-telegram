@@ -59,6 +59,10 @@ export class BinanceFutures {
   private lastSyncTs = 0;
   private SYNC_TTL = 30_000; // обновлять смещение раз в 30 сек
 
+  // ✅ НОВОЕ: периодическая перезагрузка markets для новых листингов
+  private lastMarketsReloadTs = 0;
+  private MARKETS_RELOAD_INTERVAL = Number(process.env.MARKETS_RELOAD_INTERVAL_MS || 5 * 60 * 1000); // 5 минут по умолчанию
+
   // ====== НОВОЕ: простое кэширование горячих REST-вызовов ======
   private ordersCache = new Map<string, { ts: number; data: any[] }>();
   private orderCacheMs = Number(process.env.BINANCE_CACHE_ORDERS_MS || 1000);
@@ -66,14 +70,6 @@ export class BinanceFutures {
   private positionCacheMs = Number(process.env.BINANCE_CACHE_POSITIONS_MS || 1500);
   private positionSizeCache = new Map<string, { ts: number; size: number }>();
   private positionSizeCacheMs = Number(process.env.BINANCE_CACHE_POSITION_SIZE_MS || 800);
-  private tickerCache = new Map<string, { ts: number; data: any }>();
-  private tickerCacheMs = Number(process.env.BINANCE_CACHE_TICKER_MS || 800);
-
-  private ordersCache = new Map<string, { ts: number; data: any[] }>();
-  private orderCacheMs = Number(process.env.BINANCE_CACHE_ORDERS_MS || 1000);
-  private positionsCache?: { ts: number; data: any[] };
-  private positionCacheMs = Number(process.env.BINANCE_CACHE_POSITIONS_MS || 1500);
-  private positionSizeCache = new Map<string, { ts: number; size: number }>();
   private tickerCache = new Map<string, { ts: number; data: any }>();
   private tickerCacheMs = Number(process.env.BINANCE_CACHE_TICKER_MS || 800);
 
@@ -133,14 +129,6 @@ export class BinanceFutures {
     return this.sapi!;
   }
 
-  // ====== Кэш-хелперы ======
-  private clearOrderCache(symbol: string) { this.ordersCache.delete(symbol); }
-  private clearTickerCache(symbol: string) { this.tickerCache.delete(symbol); }
-  private clearPositionsCache() { this.positionsCache = undefined; }
-  private clearPositionSizeCache(symbol?: string) {
-    if (symbol) this.positionSizeCache.delete(symbol); else this.positionSizeCache.clear();
-  }
-
   // ====== ДОБАВЛЕНО: жёсткая синхронизация со временем Binance ======
   private async syncServerTime(force = false) {
     const now = Date.now();
@@ -196,7 +184,36 @@ export class BinanceFutures {
   }
 
   // ====== Рынки и фильтры ======
-  async loadMarkets() { return this.withRetry(() => this.fapi.loadMarkets()); }
+  async loadMarkets(reload = false) { 
+    // ✅ Автоматическая периодическая перезагрузка
+    const now = Date.now();
+    const shouldAutoReload = (now - this.lastMarketsReloadTs) > this.MARKETS_RELOAD_INTERVAL;
+    
+    if (reload || shouldAutoReload) {
+      this.lastMarketsReloadTs = now;
+      return this.withRetry(() => this.fapi.loadMarkets(true));
+    }
+    
+    return this.withRetry(() => this.fapi.loadMarkets(false)); 
+  }
+  
+  /**
+   * ✅ НОВОЕ: Безопасное получение market с автоматической перезагрузкой при отсутствии символа
+   */
+  async marketSafe(symbol: string) {
+    try {
+      return this.fapi.market(symbol);
+    } catch (err: any) {
+      // Если символ не найден — пробуем перезагрузить markets
+      if (err?.message?.includes('does not have market symbol')) {
+        console.log(`⚠️ Символ ${symbol} не найден в кэше, перезагружаю markets...`);
+        await this.loadMarkets(true); // reload=true
+        return this.fapi.market(symbol);
+      }
+      throw err;
+    }
+  }
+  
   market(symbol: string) { return this.fapi.market(symbol); }
 
   // ✅ Берём шаги из нативных фильтров Binance (LOT_SIZE / PRICE_FILTER / MIN_NOTIONAL / MARKET_LOT_SIZE)
