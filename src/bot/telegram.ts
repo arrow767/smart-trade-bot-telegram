@@ -538,8 +538,18 @@ bot.on("text", async (ctx)=>{
     const userId = ctx.from?.id || 0;
     const state = editState.get(userId);
     
+    // ✅ Проверяем, является ли это торговой командой
+    const isTradingCommand = /^[ls]\s+/i.test(text) || /^[0-9]$/.test(text) || text.startsWith("cancel") || text.startsWith("close");
+    
+    // Если это торговая команда и идёт редактирование — выходим из режима редактирования
+    if (state && isTradingCommand) {
+      editState.delete(userId);
+      await ctx.reply(`✅ Выход из режима редактирования`, { parse_mode:"HTML" });
+      // Продолжаем обработку команды ниже
+    }
+    
     // ✅ Если идёт редактирование пресета — обработать
-    if (state) {
+    if (state && !isTradingCommand) {
       if (state.preset === "__new__" && state.field === "name") {
         // Создание нового пресета
         const name = text;

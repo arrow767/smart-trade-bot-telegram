@@ -106,6 +106,11 @@ export class BinanceFutures {
     console.log("🔄 Синхронизация времени с Binance...");
     await this.syncServerTime(true);
     console.log("✅ Синхронизация завершена");
+    
+    // Очищаем кэши, чтобы увидеть актуальные данные (ордера, позиции, тикеры)
+    this.ordersCache.clear();
+    this.positionsCache = undefined; // сбрасываем кэш позиций
+    this.tickerCache.clear();
   }
 
   // ——— общая проверка наличия ключей перед приватными вызовами ———
