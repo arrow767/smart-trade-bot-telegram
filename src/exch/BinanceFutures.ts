@@ -141,16 +141,26 @@ export class BinanceFutures {
     const now = Date.now();
     if (!force && now - this.lastSyncTs < this.SYNC_TTL) return;
 
-    // ccxt raw endpoint: /fapi/v1/time
-    const server = await (this.fapi as any).fapiPublicGetTime();
-    const serverTs = Number(server?.serverTime ?? 0);
-    const localTs = Date.now();
+    try {
+      // Прямой вызов публичного endpoint без ccxt (чтобы избежать цикла с -1021)
+      const response = await fetch("https://fapi.binance.com/fapi/v1/time");
+      if (!response.ok) {
+        console.warn(`⚠️ Failed to sync time: HTTP ${response.status}`);
+        return;
+      }
+      const data = await response.json();
+      const serverTs = Number(data?.serverTime ?? 0);
+      const localTs = Date.now();
 
-    if (Number.isFinite(serverTs) && serverTs > 0) {
-      // положительное — локальные часы спешат
-      this.timeSkewMs = localTs - serverTs;
-      // ccxt binance читает difference из этого поля
-      (this.fapi as any).timeDifference = -this.timeSkewMs;
+      if (Number.isFinite(serverTs) && serverTs > 0) {
+        // положительное — локальные часы спешат
+        this.timeSkewMs = localTs - serverTs;
+        // ccxt binance читает difference из этого поля
+        (this.fapi as any).timeDifference = -this.timeSkewMs;
+        console.log(`⏱️ Time sync: local=${localTs}, server=${serverTs}, skew=${this.timeSkewMs}ms`);
+      }
+    } catch (err: any) {
+      console.warn(`⚠️ syncServerTime error:`, err?.message || err);
     }
     this.lastSyncTs = now;
   }
