@@ -162,6 +162,15 @@ export async function runCommand(
         // Запрашиваем ВСЕ ордера со всех символов
         const allOrders = await ex.fetchAllOpenOrdersAcrossSymbols();
         for (const o of allOrders) {
+          // Парсим время безопасно
+          let datetime = "";
+          try {
+            const timestamp = Number(o.time || o.updateTime || 0);
+            if (timestamp > 0) {
+              datetime = new Date(timestamp).toISOString().slice(0,19).replace("T"," ");
+            }
+          } catch {}
+          
           rows.push({
             id: String(o.orderId || ""),
             symbol: String(o.symbol || ""),
@@ -172,12 +181,13 @@ export async function runCommand(
             stopPrice: Number(o.stopPrice ?? 0) || undefined,
             reduceOnly: (o.reduceOnly === true || o.reduceOnly === "true"),
             closePosition: (o.closePosition === true || o.closePosition === "true"),
-            datetime: o.time ? new Date(o.time).toISOString().slice(0,19).replace("T"," ") : "",
+            datetime,
             status: String(o.status || ""),
           });
         }
       }
     } catch (e: any) {
+      console.error("Orders fetch error details:", e);
       info(`Ошибка получения ордеров: ${e?.message || e}`);
     }
     
