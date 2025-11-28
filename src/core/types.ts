@@ -12,6 +12,7 @@ export type ParsedCmd =
       dryRun: boolean;
       market?: { usd: number } | null;
       riskUsdOverride?: number;
+      noPreset?: boolean; // ✅ НОВОЕ: отключение автоматических SL/TP
     }
   | { kind: "help" }
   | { kind: "tasks" }

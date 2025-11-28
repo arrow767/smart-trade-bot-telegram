@@ -188,10 +188,12 @@ export function parseLine(line: string): ParsedCmd | null {
   const rawTicker = p[idx+1];
   if (!rawTicker) return null;
 
-  // MARKET-вход краткий: l <sym> <usd> [preset]
+  // MARKET-вход краткий: l <sym> <usd> [preset|-]
   if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || isNaN(Number(p[idx+3])))) {
     const usd = parseHumanUsd(p[idx+2]);
-    const presetName = p[idx+3] ? p[idx+3] : DEFAULT_PRESET;
+    const presetArg = p[idx+3] || DEFAULT_PRESET;
+    const noPreset = presetArg === "-" || presetArg === "—"; // дефис или тире
+    const presetName = noPreset ? DEFAULT_PRESET : presetArg;
     return {
       kind: "trade",
       dir: cmd as "l" | "s",
@@ -201,6 +203,7 @@ export function parseLine(line: string): ParsedCmd | null {
       presetName,
       dryRun: false,
       riskUsdOverride: riskOverride,
+      noPreset, // ✅ НОВОЕ
     };
   }
 
@@ -216,14 +219,21 @@ export function parseLine(line: string): ParsedCmd | null {
 
   let presetName = DEFAULT_PRESET;
   let dryRun = false;
+  let noPreset = false; // ✅ НОВОЕ
+  
   for (; i < p.length; i++) {
     const tok = p[i].toLowerCase();
     if (tok === "--dry") {
       dryRun = true;
       continue;
     }
+    // ✅ НОВОЕ: проверка на "-" или тире для отключения пресета
+    if (tok === "-" || tok === "—") {
+      noPreset = true;
+      continue;
+    }
     presetName = p[i];
   }
 
-  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null, riskUsdOverride: riskOverride };
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null, riskUsdOverride: riskOverride, noPreset };
 }

@@ -599,7 +599,7 @@ export async function runCommand(
   // --- торговля ---
   if (parsed.kind !== "trade") return;
 
-  const { dir, rawTicker, legs, presetName, dryRun, market, riskUsdOverride } = parsed as any;
+  const { dir, rawTicker, legs, presetName, dryRun, market, riskUsdOverride, noPreset } = parsed as any;
   const side = dir === "l" ? "long" : "short";
   const sideEntry = side === "long" ? "buy" : "sell";
   const sideExit = side === "long" ? "sell" : "buy";
@@ -667,38 +667,47 @@ export async function runCommand(
           const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
           const effectiveRiskUsd = baseRisk * factor;
 
-            const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
-            const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
-            const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
-            const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
-            if (!Number.isFinite(safeSL) || safeSL <= 0) {
-              throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
-            }
-
-            await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-            await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
-            slPxCurrent = safeSL;
-
-            if (!tpsPlaced) {
-              const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
-              let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
-              tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
-              tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
-              for (let i = 0; i < re.tpPrices.length; i++) {
-                const q = tpQtys[i];
-                if (q <= 0) continue;
-                const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-                const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
-                if (ord?.id) tpIndexById.set(String(ord.id), i + 1);
+            // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
+            if (!noPreset) {
+              const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+              const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
+              const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
+              const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
+              if (!Number.isFinite(safeSL) || safeSL <= 0) {
+                throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
               }
-              tpsPlaced = true;
 
-              info(formatPlan(mode, {
-                entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
-                sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
-                tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
-              }));
+              await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
+              await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+              slPxCurrent = safeSL;
+
+              if (!tpsPlaced) {
+                const planningPreset = { ...preset, trade_risk: baseRisk } as any;
+                const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
+                let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
+                tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+                tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                for (let i = 0; i < re.tpPrices.length; i++) {
+                  const q = tpQtys[i];
+                  if (q <= 0) continue;
+                  const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                  const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+                  if (ord?.id) tpIndexById.set(String(ord.id), i + 1);
+                }
+                tpsPlaced = true;
+
+                info(formatPlan(mode, {
+                  entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                  sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
+                  tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
+                }));
+              }
+            } else {
+              // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
+              info(mode === "console" 
+                ? `✅ MARKET вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
+                : `<b>✅ MARKET вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
+              );
             }
 
             lastSize = posSize;
@@ -977,50 +986,59 @@ export async function runCommand(
           const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
           const effectiveRiskUsd = baseRisk * factor;
 
-          const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
-          const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
-          const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
-          const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
-          if (!Number.isFinite(safeSL) || safeSL <= 0) {
-            throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
-          }
-
-          await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-          const sideExit2 = side === "long" ? "sell" : "buy";
-          await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
-          slPxCurrent = safeSL;
-
-          if (entriesLeft === 0 && !tpsPlaced) {
-            const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-            const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
-
-            let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
-            tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
-            tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
-            for (let i = 0; i < re.tpPrices.length; i++) {
-              const q = tpQtys[i];
-              if (q <= 0) continue;
-              const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-              const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
-              if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
+          // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
+          if (!noPreset) {
+            const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+            const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
+            const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
+            const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
+            if (!Number.isFinite(safeSL) || safeSL <= 0) {
+              throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
             }
-            tpsPlaced = true;
+
+            await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
+            const sideExit2 = side === "long" ? "sell" : "buy";
+            await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
+            slPxCurrent = safeSL;
+
+            if (entriesLeft === 0 && !tpsPlaced) {
+              const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
+              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
+
+              let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
+              tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+              tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+              for (let i = 0; i < re.tpPrices.length; i++) {
+                const q = tpQtys[i];
+                if (q <= 0) continue;
+                const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
+                if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
+              }
+              tpsPlaced = true;
+            }
+
+            const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
+            const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset3 });
+
+            info(
+              formatPlan(mode, {
+                entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
+                tps: re2.tpPrices.map((p, i) => ({
+                  price: String(ex.priceToPrecision(symbolCcxt, p)),
+                  qty: 0,
+                  R: presetForRisk.take_profit[i],
+                })),
+              })
+            );
+          } else {
+            // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
+            info(mode === "console" 
+              ? `✅ Вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
+              : `<b>✅ Вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
+            );
           }
-
-          const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
-          const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset3 });
-
-          info(
-            formatPlan(mode, {
-              entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
-              sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
-              tps: re2.tpPrices.map((p, i) => ({
-                price: String(ex.priceToPrecision(symbolCcxt, p)),
-                qty: 0,
-                R: presetForRisk.take_profit[i],
-              })),
-            })
-          );
 
           lastSize = posSize;
           lastAvg = entryAvg;
@@ -1051,7 +1069,8 @@ export async function runCommand(
 
         // Доп. гарантированная постановка TP, если все входные заявки исчезли,
         // позиция > 0, а TP ещё не поставлены (мог пропасть "increased" триггер)
-        if (!tpsPlaced && entriesLeft === 0 && posSize > 0) {
+        // ✅ НОВОЕ: Пропускаем если пресеты отключены
+        if (!noPreset && !tpsPlaced && entriesLeft === 0 && posSize > 0) {
           try {
             const filters = ex.getSymbolFilters(symbolCcxt);
             const totalPlannedUsd = task.totalUsd ?? posSize * entryAvg;
