@@ -445,3 +445,44 @@ export function formatTaskInfo(
   ];
   return mode === "console" ? lineBox(lines, "TASK INFO") : monoBlock(lines.join("\n"));
 }
+
+// ===== НОВОЕ: красивое уведомление о создании сделки =====
+export function formatTradeNotification(p: {
+  ticker: string;
+  side: "long"|"short";
+  riskUsd: number;
+  legs: Array<{ usd: number; price: number; type: "LIMIT"|"STOP"|"MARKET" }>;
+  takes: number[];
+  takesRatio?: number[];
+  preset: string;
+  market?: boolean;
+}): string {
+  const sideEmoji = p.side === "long" ? "🟢" : "🔴";
+  const sideText = p.side === "long" ? "LONG" : "SHORT";
+  
+  let msg = `${sideEmoji} <b>${sideText} ${p.ticker.toUpperCase()}</b>\n\n`;
+  
+  msg += `📊 <b>Risk:</b> $${p.riskUsd.toFixed(2)}\n`;
+  msg += `⚙️ <b>Preset:</b> ${p.preset}\n\n`;
+  
+  // Входы
+  if (p.market) {
+    const totalUsd = p.legs.reduce((sum, leg) => sum + leg.usd, 0);
+    msg += `💰 <b>Volume:</b> $${totalUsd.toFixed(2)} (MARKET)\n\n`;
+  } else {
+    msg += `💰 <b>Входы:</b>\n`;
+    p.legs.forEach((leg, idx) => {
+      const typeEmoji = leg.type === "LIMIT" ? "📌" : leg.type === "STOP" ? "🛑" : "⚡";
+      msg += `  ${typeEmoji} ${leg.type} #${idx + 1}: $${leg.usd.toFixed(2)} @ ${leg.price}\n`;
+    });
+    msg += `\n`;
+  }
+  
+  // Тейки
+  msg += `🎯 <b>Takes:</b> ${p.takes.map(t => `${t}R`).join(", ")}\n`;
+  if (p.takesRatio && p.takesRatio.length > 0) {
+    msg += `   <i>Распределение: ${p.takesRatio.map(r => `${r}%`).join(", ")}</i>\n`;
+  }
+  
+  return msg;
+}

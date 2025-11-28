@@ -3,7 +3,7 @@ import "dotenv/config";
 import { Telegraf, Markup } from "telegraf";
 import { BinanceFutures } from "../exch/BinanceFutures";
 import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "../core/engine";
-import { banner } from "../core/format";
+import { banner, formatTradeNotification } from "../core/format";
 import { setDefaultResultOrder } from "dns";
 import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetName, setDefaultPreset } from "../config/trading_config";
 setDefaultResultOrder?.("ipv4first");  // принудительно IPv4 в Node
@@ -17,6 +17,9 @@ const allowedUserEnv  = (process.env.TELEGRAM_ALLOWED_USERNAME || "").trim().toL
 const allowedChatIds = allowedChatsEnv ? allowedChatsEnv.split(",").map(s=>Number(s.trim())).filter(n=>!Number.isNaN(n)) : [];
 function isAllowed(ctx:any){ if (allowedChatIds.length===0 && !allowedUserEnv) return true; const chatId=Number(ctx.chat?.id ?? ctx.from?.id); const user=String(ctx.from?.username||"").toLowerCase(); return allowedChatIds.includes(chatId)|| (!!allowedUserEnv && user===allowedUserEnv); }
 function deny(ctx:any){ const chatId=Number(ctx.chat?.id ?? ctx.from?.id); const username=ctx.from?.username?`@${ctx.from.username}`:"(no username)"; return ctx.reply(`Access denied.\nchatId: <code>${chatId}</code>\nuser: <code>${username}</code>`, { parse_mode:"HTML" }); }
+
+// ✅ НОВОЕ: опциональные уведомления о сделках
+const ENABLE_TRADE_NOTIFICATIONS = String(process.env.TELEGRAM_TRADE_NOTIFICATIONS || "true").toLowerCase() === "true" || String(process.env.TELEGRAM_TRADE_NOTIFICATIONS || "true") === "1";
 
 // Optional proxy agent for Telegram only
 const proxyUrl = (process.env.TELEGRAM_PROXY_URL || "").trim();
@@ -40,6 +43,9 @@ if (proxyUrl) {
 const bot = agent ? new Telegraf(token, { telegram: { agent } }) : new Telegraf(token);
 const ex = new BinanceFutures();
 const book = new TaskBook();
+
+// ✅ НОВОЕ: Хранилище ожидающих подтверждения команд
+const pendingTrades = new Map<string, { parsed: any; userId: number; chatId: number; messageId?: number }>();
 
 // Inline keyboard (under messages)
 const mainKb = Markup.inlineKeyboard([
@@ -524,6 +530,70 @@ bot.action("NOOP", async (ctx)=>{
   } catch {}
 });
 
+// ✅ НОВОЕ: обработчик кнопки "ОК" для подтверждения сделки
+bot.action(/TRADE_CONFIRM\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery("✅ Выполняю команду...");
+    
+    const tradeId = ctx.match![1];
+    const pending = pendingTrades.get(tradeId);
+    
+    if (!pending) {
+      await ctx.reply("⚠️ Команда устарела или уже выполнена.", { parse_mode: "HTML" });
+      return;
+    }
+    
+    // Удаляем из очереди
+    pendingTrades.delete(tradeId);
+    
+    // Удаляем кнопки из сообщения
+    try {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    } catch {}
+    
+    // Выполняем команду
+    await runCommand(ex, book, pending.parsed, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
+  } catch (e:any) {
+    console.error("TRADE_CONFIRM error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+  }
+});
+
+// ✅ НОВОЕ: обработчик кнопки "Cancel" для отмены сделки
+bot.action(/TRADE_CANCEL\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery("❌ Отменено");
+    
+    const tradeId = ctx.match![1];
+    const pending = pendingTrades.get(tradeId);
+    
+    if (!pending) {
+      await ctx.reply("⚠️ Команда уже не активна.", { parse_mode: "HTML" });
+      return;
+    }
+    
+    // Удаляем из очереди
+    pendingTrades.delete(tradeId);
+    
+    // Удаляем кнопки и добавляем метку отмены
+    try {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+      await ctx.reply("❌ <b>Команда отменена</b>", { parse_mode: "HTML" });
+    } catch {}
+  } catch (e:any) {
+    console.error("TRADE_CANCEL error:", e);
+  }
+});
+
+// DEPRECATED: старый обработчик (оставлен для совместимости)
+bot.action("TRADE_OK", async (ctx)=>{
+  try {
+    await ctx.answerCbQuery("✅");
+  } catch {}
+});
+
 // ==============================
 // Обработка текста для редактирования
 // ==============================
@@ -672,6 +742,80 @@ bot.on("text", async (ctx)=>{
     if (parsed.kind==="help")  {
       const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
       return ctx.reply(help, { parse_mode:"HTML", ...mainKb });
+    }
+
+    // ✅ НОВОЕ: Отправка уведомления о сделке перед выполнением
+    if (parsed.kind === "trade" && ENABLE_TRADE_NOTIFICATIONS) {
+      try {
+        const preset = await getPreset(parsed.presetName);
+        const riskUsd = Number.isFinite(parsed.riskUsdOverride) && (parsed.riskUsdOverride as number) > 0 ? (parsed.riskUsdOverride as number) : preset.trade_risk;
+        
+        let legs: Array<{ usd: number; price: number; type: "LIMIT"|"STOP"|"MARKET" }> = [];
+        
+        if (parsed.market && parsed.market.usd > 0) {
+          legs = [{ usd: parsed.market.usd, price: 0, type: "MARKET" }];
+        } else {
+          // Получаем текущую цену для определения типа ордера
+          const { symbolCcxt } = await import("../core/SymbolResolver").then(m => m.normalizeTickerToUsdt(parsed.rawTicker));
+          await ex.loadMarkets().catch(()=>{});
+          const ticker = await ex.fetchTicker(symbolCcxt);
+          const currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
+          
+          const isLong = parsed.dir === "l";
+          legs = parsed.legs.map((leg: any) => {
+            // LIMIT если цена лучше текущей (для long - ниже, для short - выше)
+            // STOP если цена хуже текущей (для long - выше, для short - ниже)
+            const isLimit = isLong ? leg.price < currentPrice : leg.price > currentPrice;
+            return {
+              usd: leg.usd,
+              price: leg.price,
+              type: isLimit ? "LIMIT" as const : "STOP" as const
+            };
+          });
+        }
+        
+        const notification = formatTradeNotification({
+          ticker: parsed.rawTicker,
+          side: parsed.dir === "l" ? "long" : "short",
+          riskUsd,
+          legs,
+          takes: preset.take_profit,
+          takesRatio: preset.take_profit_ratio,
+          preset: parsed.presetName,
+          market: !!parsed.market
+        });
+        
+        // ✅ Генерируем уникальный ID для этой команды
+        const tradeId = `trade_${userId}_${Date.now()}`;
+        
+        // ✅ Две кнопки: ОК и Cancel
+        const confirmButtons = Markup.inlineKeyboard([
+          [
+            Markup.button.callback("✅ ОК", `TRADE_CONFIRM|${tradeId}`),
+            Markup.button.callback("❌ Cancel", `TRADE_CANCEL|${tradeId}`)
+          ]
+        ]);
+        
+        const msg = await ctx.reply(notification, { parse_mode: "HTML", ...confirmButtons });
+        
+        // Сохраняем команду для последующего выполнения
+        pendingTrades.set(tradeId, {
+          parsed,
+          userId,
+          chatId: ctx.chat?.id || 0,
+          messageId: msg.message_id
+        });
+        
+        // Автоматическая очистка через 5 минут
+        setTimeout(() => {
+          pendingTrades.delete(tradeId);
+        }, 5 * 60 * 1000);
+        
+        return; // НЕ выполняем команду сразу, ждем подтверждения
+      } catch (e: any) {
+        console.error("Trade notification error:", e);
+        // При ошибке уведомления выполняем команду сразу
+      }
     }
 
     await runCommand(ex, book, parsed, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
