@@ -46,6 +46,15 @@ function sideTag(mode: UIMode, side: "long"|"short"): string {
   return side === "long" ? "🟢L" : "🔴S";
 }
 
+// ✅ НОВОЕ: Форматирование чисел с разделителями тысяч для читабельности
+function formatUsd(amount: number, decimals: number = 2): string {
+  const fixed = amount.toFixed(decimals);
+  const [intPart, decPart] = fixed.split(".");
+  // Добавляем пробелы как разделители тысяч
+  const formatted = intPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return decPart ? `${formatted}.${decPart}` : formatted;
+}
+
 function lineBox(lines: string[], title?: string): string {
   const width = Math.max(
     ...(lines.length ? lines.map(l => visLen(l)) : [0]),
@@ -468,19 +477,19 @@ export function formatTradeNotification(p: {
     msg += `⚙️ <b>Preset:</b> - (БЕЗ авто SL/TP)\n`;
     msg += `⚠️ <i>Стопы и тейки НЕ будут выставлены автоматически</i>\n\n`;
   } else {
-    msg += `📊 <b>Risk:</b> $${p.riskUsd.toFixed(2)}\n`;
+    msg += `📊 <b>Risk:</b> $${formatUsd(p.riskUsd)}\n`;
     msg += `⚙️ <b>Preset:</b> ${p.preset}\n\n`;
   }
   
   // Входы
   if (p.market) {
     const totalUsd = p.legs.reduce((sum, leg) => sum + leg.usd, 0);
-    msg += `💰 <b>Volume:</b> $${totalUsd.toFixed(2)} (MARKET)\n\n`;
+    msg += `💰 <b>Volume:</b> $${formatUsd(totalUsd)} (MARKET)\n\n`;
   } else {
     msg += `💰 <b>Входы:</b>\n`;
     p.legs.forEach((leg, idx) => {
       const typeEmoji = leg.type === "LIMIT" ? "📌" : leg.type === "STOP" ? "🛑" : "⚡";
-      msg += `  ${typeEmoji} ${leg.type} #${idx + 1}: $${leg.usd.toFixed(2)} @ ${leg.price}\n`;
+      msg += `  ${typeEmoji} ${leg.type} #${idx + 1}: $${formatUsd(leg.usd)} @ ${leg.price}\n`;
     });
     msg += `\n`;
   }
