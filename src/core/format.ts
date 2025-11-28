@@ -456,14 +456,21 @@ export function formatTradeNotification(p: {
   takesRatio?: number[];
   preset: string;
   market?: boolean;
+  noPreset?: boolean; // ✅ НОВОЕ: флаг отключения пресета
 }): string {
   const sideEmoji = p.side === "long" ? "🟢" : "🔴";
   const sideText = p.side === "long" ? "LONG" : "SHORT";
   
   let msg = `${sideEmoji} <b>${sideText} ${p.ticker.toUpperCase()}</b>\n\n`;
   
-  msg += `📊 <b>Risk:</b> $${p.riskUsd.toFixed(2)}\n`;
-  msg += `⚙️ <b>Preset:</b> ${p.preset}\n\n`;
+  // ✅ НОВОЕ: Если пресеты отключены - показываем "-" и предупреждение
+  if (p.noPreset) {
+    msg += `⚙️ <b>Preset:</b> - (БЕЗ авто SL/TP)\n`;
+    msg += `⚠️ <i>Стопы и тейки НЕ будут выставлены автоматически</i>\n\n`;
+  } else {
+    msg += `📊 <b>Risk:</b> $${p.riskUsd.toFixed(2)}\n`;
+    msg += `⚙️ <b>Preset:</b> ${p.preset}\n\n`;
+  }
   
   // Входы
   if (p.market) {
@@ -478,10 +485,12 @@ export function formatTradeNotification(p: {
     msg += `\n`;
   }
   
-  // Тейки
-  msg += `🎯 <b>Takes:</b> ${p.takes.map(t => `${t}R`).join(", ")}\n`;
-  if (p.takesRatio && p.takesRatio.length > 0) {
-    msg += `   <i>Распределение: ${p.takesRatio.map(r => `${r}%`).join(", ")}</i>\n`;
+  // ✅ НОВОЕ: Тейки показываем только если пресеты не отключены
+  if (!p.noPreset) {
+    msg += `🎯 <b>Takes:</b> ${p.takes.map(t => `${t}R`).join(", ")}\n`;
+    if (p.takesRatio && p.takesRatio.length > 0) {
+      msg += `   <i>Распределение: ${p.takesRatio.map(r => `${r}%`).join(", ")}</i>\n`;
+    }
   }
   
   return msg;

@@ -782,7 +782,8 @@ bot.on("text", async (ctx)=>{
           takes: preset.take_profit,
           takesRatio: preset.take_profit_ratio,
           preset: parsed.presetName,
-          market: !!parsed.market
+          market: !!parsed.market,
+          noPreset: parsed.noPreset || false, // ✅ НОВОЕ: передаём флаг noPreset
         });
         
         // ✅ Генерируем уникальный ID для этой команды
