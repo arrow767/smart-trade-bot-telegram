@@ -608,8 +608,22 @@ bot.on("text", async (ctx)=>{
     const userId = ctx.from?.id || 0;
     const state = editState.get(userId);
     
-    // ✅ Проверяем, является ли это торговой командой
-    const isTradingCommand = /^[ls]\s+/i.test(text) || /^[0-9]$/.test(text) || text.startsWith("cancel") || text.startsWith("close");
+    // ✅ ИСПРАВЛЕНО: Проверяем, является ли это торговой командой
+    // Поддерживаем команды с риском в начале: "100 l xrp 5000"
+    const isTradingCommand = 
+      /^[ls]\s+/i.test(text) || // l xrp... или s btc...
+      /^\d+\s+[ls]\s+/i.test(text) || // 100 l xrp... (с риском в начале)
+      /^\d+\$?\s+[ls]\s+/i.test(text) || // 100$ l xrp... (с $ после риска)
+      /^[0-9]$/.test(text) || // быстрые цифры: 1, 2, 3, 9
+      text.startsWith("cancel") || 
+      text.startsWith("close") ||
+      text.startsWith("edit") ||
+      text.startsWith("orders") ||
+      text.startsWith("positions") ||
+      text.startsWith("deposit") ||
+      text.startsWith("tasks") ||
+      text.startsWith("info") ||
+      text.startsWith("help");
     
     // Если это торговая команда и идёт редактирование — выходим из режима редактирования
     if (state && isTradingCommand) {
