@@ -906,7 +906,8 @@ export async function runCommand(
         const entriesLeft = open.filter((o: any) => o.id && keep.has(o.id)).length;
 
         // === Исправлено: надёжное определение «снято вручную» ===
-        // ⚠️ КРИТИЧНО: Не проверяем исчезновение ордеров сразу после создания задачи
+        // ⚠️ КРИТИЧНО: Не проверяем исчезновение ордеров сразу после создания задачи (защита от race condition)
+        // НО: если ордер снят вручную после grace period - сразу обнаруживаем и удаляем
         const taskAge = Date.now() - TASK_CREATED_AT;
         const canCheckGone = taskAge >= MIN_TASK_AGE_MS;
         
@@ -917,14 +918,13 @@ export async function runCommand(
             continue;
           }
           
-          // ⚠️ Защита: не начинаем отслеживать исчезновение ордеров сразу после создания
-          if (!canCheckGone) {
-            continue; // Пропускаем проверку, если задача только что создана
-          }
-          
           // не найден среди открытых
           const rec = gone.get(id);
           if (!rec) {
+            // ⚠️ Защита: не начинаем отслеживать исчезновение ордеров сразу после создания
+            if (!canCheckGone) {
+              continue; // Пропускаем проверку, если задача только что создана
+            }
             // помечаем момент исчезновения
             gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
             continue;
@@ -940,7 +940,7 @@ export async function runCommand(
           }
 
           if (elapsed < MANUAL_GONE_GRACE_MS) {
-            // ждём подтверждения
+            // ждём подтверждения (4 секунды)
             continue;
           }
 
@@ -949,13 +949,12 @@ export async function runCommand(
           const flat = posSize < Math.max(minQty * 0.5, 1e-12);
 
           if (flat) {
-            // ⚠️ Больше НЕ удаляем задачу немедленно.
-            // Просто вычёркиваем этот вход и даём шансу другим входам этой задачи остаться в силе.
+            // Позиция пустая - ордер снят вручную, удаляем из keep
             keep.delete(id);
             gone.delete(id);
             // продолжаем цикл
           } else {
-            // уже в позиции — ничего не снимаем, только вычёркиваем этот id из keep и продолжаем
+            // уже в позиции — ордер исполнился, удаляем из keep
             keep.delete(id);
             gone.delete(id);
           }
@@ -964,6 +963,7 @@ export async function runCommand(
         // ✅ НОВЫЙ чек: если мы вне позиции и ВСЕ входные отложки этой задачи сняты — удаляем задачу
         // НО: учитываем, что могут быть другие задачи на этот же символ!
         // ⚠️ КРИТИЧНО: Не проверяем сразу после создания задачи (защита от race condition с API)
+        // НО: если ордера сняты вручную после grace period - удаляем задачу
         {
           const taskAge = Date.now() - TASK_CREATED_AT;
           const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
@@ -971,9 +971,15 @@ export async function runCommand(
           
           // Проверяем только если:
           // 1. Прошло достаточно времени с момента создания задачи (защита от race condition)
+          //    ИЛИ все ордера исчезли из списка открытых (сняты вручную)
           // 2. Ордера действительно были созданы (entryIds не пустой)
           // 3. Все ордера исчезли из keep (сняты или исполнились)
-          if (flat && keep.size === 0 && taskAge >= MIN_TASK_AGE_MS && entryIds.length > 0) {
+          // 4. Позиция пустая (flat)
+          const allOrdersGone = entryIds.length > 0 && entryIds.every(id => !open.some((o: any) => o.id === id));
+          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && 
+            (taskAge >= MIN_TASK_AGE_MS || (allOrdersGone && taskAge >= 2000)); // Минимум 2 секунды для защиты от race condition
+          
+          if (canRemove) {
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
             const otherHasActiveEntries = otherTasks.some(t => 
@@ -997,7 +1003,11 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
-        if (posSize > 0 && increased) {
+        // ✅ ИСПРАВЛЕНО: Выставляем TP/SL не только при увеличении позиции, но и при первом обнаружении позиции
+        // Это важно, если отложка сработала между циклами и позиция уже открыта
+        const shouldPlaceTP_SL = posSize > 0 && (increased || (lastSize === 0 && posSize > 0));
+
+        if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
 
@@ -1019,10 +1029,17 @@ export async function runCommand(
 
             await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
             const sideExit2 = side === "long" ? "sell" : "buy";
-            await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
-            slPxCurrent = safeSL;
+            
+            // ✅ ИСПРАВЛЕНО: Выставляем SL всегда, если его ещё нет или он изменился
+            if (!slPxCurrent || Math.abs(slPxCurrent - safeSL) > 1e-9) {
+              await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL).catch((e) => {
+                console.warn(`Failed to place SL: ${e?.message || e}`);
+              });
+              slPxCurrent = safeSL;
+            }
 
-            if (entriesLeft === 0 && !tpsPlaced) {
+            // ✅ ИСПРАВЛЕНО: Выставляем TP если все входы исполнились ИЛИ позиция уже открыта (отложка сработала)
+            if ((entriesLeft === 0 || (lastSize === 0 && posSize > 0)) && !tpsPlaced) {
               const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
               const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
 
