@@ -974,9 +974,6 @@ export async function runCommand(
       // ✅ НОВОЕ: Периодическая очистка висячих tasks (каждые 30 сек)
       let lastCleanupTs = Date.now();
       const CLEANUP_INTERVAL_MS = 30_000;
-      
-      // ✅ НОВОЕ: Время создания задачи для проверки возраста
-      const TASK_CREATED_AT = Date.now();
 
       for (;;) {
         if (book.get(task.id)?.cancelRequested) {
