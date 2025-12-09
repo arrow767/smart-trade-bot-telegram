@@ -957,79 +957,20 @@ export async function runCommand(
           firstSeenAt = Date.now();
         }
 
-        // === УПРОЩЁННОЕ определение: ордер исполнился vs снят вручную ===
-        // ✅ Простая логика: если ордер исчез и позиция не появилась → снят вручную
-        const taskAge = Date.now() - TASK_CREATED_AT;
-        const canCheckGone = taskAge >= 5000; // Минимум 5 секунд после создания
-        
+        // ✅ УПРОЩЕНО: Обновляем keep - удаляем ордера которые больше не открыты
+        // Если ордер исчез и позиция не появилась - удаляем из keep (будет обработано в проверке ниже)
         for (const id of [...keep]) {
           const idStr = String(id);
-          // Проверяем по ID и по clientOrderId (для Algo Orders)
           const exists = allOpenOrderIds.has(idStr) || 
                         allOpenOrders.some((o: any) => 
                           String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
                         );
-          if (exists) {
-            // Ордер ещё открыт - всё ОК
-            gone.delete(id);
-            if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} still exists in open orders`);
-            }
-            continue;
-          }
-          
-          // ✅ Ордер исчез из списка открытых!
-          if (mode === "console") {
-            console.log(`[DEBUG] Order ${id} DISAPPEARED from open orders! posSize=${posSize}, canCheckGone=${canCheckGone}`);
-          }
-          
-          if (!canCheckGone) {
-            if (mode === "console") {
-              console.log(`[DEBUG] Too early to check (taskAge=${taskAge}ms < 5000ms), waiting...`);
-            }
-            continue; // Слишком рано для проверки
-          }
-          
-          const rec = gone.get(id);
-          if (!rec) {
-            // Первое обнаружение исчезновения - запоминаем
-            gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
-            if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} marked as gone, waiting ${MANUAL_GONE_GRACE_MS}ms grace period...`);
-            }
-            continue;
-          }
-          
-          // Ордер уже был помечен как исчезнувший - проверяем что произошло
-          const elapsed = Date.now() - rec.ts;
-          const sizeOnGone = rec.sizeOnGone;
-          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
-          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
-
-          if (elapsed < MANUAL_GONE_GRACE_MS) {
-            // Ещё ждём подтверждения (4 секунды)
-            if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} still in grace period: elapsed=${elapsed}ms < ${MANUAL_GONE_GRACE_MS}ms`);
-            }
-            continue;
-          }
-
-          // Прошло достаточно времени - определяем что произошло
-          if (posSize > sizeOnGone + 1e-9) {
-            // ✅ Позиция УВЕЛИЧИЛАСЬ - ордер ИСПОЛНИЛСЯ
+          if (!exists) {
+            // Ордер исчез - удаляем из keep
             keep.delete(id);
-            gone.delete(id);
             if (mode === "console") {
-              console.log(`[DEBUG] ✅ Order ${id} FILLED: posSize increased from ${sizeOnGone} to ${posSize}`);
+              console.log(`[DEBUG] Order ${id} disappeared from open orders, removed from keep`);
             }
-            continue;
-          }
-
-          // ✅ Позиция НЕ увеличилась - ордер СНЯТ ВРУЧНУЮ
-          keep.delete(id);
-          gone.delete(id);
-          if (mode === "console") {
-            console.log(`[DEBUG] ✅ Order ${id} CANCELLED MANUALLY: posSize=${posSize}, sizeOnGone=${sizeOnGone}, flat=${flat}`);
           }
         }
 
@@ -1061,7 +1002,7 @@ export async function runCommand(
 
           // ✅ ПРОВЕРКА 2: Все входные ордера сняты вручную (позиции не было и нет)
         {
-          // ✅ УПРОЩЁННАЯ ПРОВЕРКА: если ордера исчезли, позиции нет, прошло время → сняты вручную
+          // ✅ ПРОСТАЯ ПРОВЕРКА: каждый цикл проверяем - если ордеров нет и позиции нет → удаляем задачу
           const allOrdersGone = entryIds.length > 0 && entryIds.every(id => {
             const idStr = String(id);
             const foundById = allOpenOrderIds.has(idStr);
@@ -1073,23 +1014,22 @@ export async function runCommand(
           
           const timeSinceCreated = Date.now() - TASK_CREATED_AT;
           
-          // ✅ ИСПРАВЛЕНО: Проверяем сразу, не ждём пока keep очистится
-          // Простая проверка:
+          // ✅ МАКСИМАЛЬНО ПРОСТАЯ ПРОВЕРКА:
           // 1. Позиция пустая (flat)
           // 2. Все ордера исчезли из списка открытых (allOrdersGone)
-          // 3. Прошло минимум 5 секунд после создания задачи
+          // 3. Прошло минимум 3 секунды после создания задачи (защита от race condition)
           // 4. Ордера были видны хотя бы раз (ordersEverSeen) - защита от ложных срабатываний
           const canRemove = flat && entryIds.length > 0 && 
-            allOrdersGone && timeSinceCreated >= 5000 && ordersEverSeen;
+            allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen;
           
           if (mode === "console" && entryIds.length > 0) {
-            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, keep.size=${keep.size}, canRemove=${canRemove}`);
+            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, canRemove=${canRemove}`);
           }
           
           if (canRemove) {
             // Логируем для отладки
             if (mode === "console") {
-              console.log(`[DEBUG] ✅ Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, removing task...`);
+              console.log(`[DEBUG] ✅ MANUAL CANCELLATION DETECTED: taskId=${task.id}, symbol=${symbolCcxt}, removing task...`);
             }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
@@ -1120,16 +1060,21 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
-        // ✅ УПРОЩЁННАЯ ЛОГИКА: Выставляем TP/SL если позиция есть и они не выставлены
-        // Простая проверка: если позиция > 0 и entryAvg > 0 (позиция реальная) → выставляем TP/SL
+        // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
+        // Если позиция есть (posSize > 0) и TP/SL не выставлены → выставляем их
         // Не зависим от lastSize, increased и других сложных условий
-        const shouldPlaceTP_SL = posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent);
+        const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+        const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
+        const shouldPlaceTP_SL = hasPosition && (!tpsPlaced || !slPxCurrent);
         
         // ✅ ЛОГИРОВАНИЕ для отладки
         if (mode === "console") {
-          console.log(`[DEBUG] Position check: posSize=${posSize}, entryAvg=${entryAvg}, lastSize=${lastSize}, entriesLeft=${entriesLeft}, tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
-          if (posSize > 0 && entryAvg > 0) {
-            console.log(`[DEBUG] ✅ POSITION DETECTED! Should place TP/SL: ${shouldPlaceTP_SL}`);
+          console.log(`[DEBUG] === CYCLE CHECK ===`);
+          console.log(`[DEBUG] Position: posSize=${posSize}, entryAvg=${entryAvg}, hasPosition=${hasPosition}`);
+          console.log(`[DEBUG] Orders: entriesLeft=${entriesLeft}, entryIds=${Array.from(entryIds).join(", ")}`);
+          console.log(`[DEBUG] TP/SL: tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
+          if (hasPosition) {
+            console.log(`[DEBUG] ✅ POSITION EXISTS! Will place TP/SL: ${shouldPlaceTP_SL}`);
           }
         }
 
@@ -1300,7 +1245,8 @@ export async function runCommand(
           if (!open.find((o: any) => o.id === id)) keep.delete(id);
         }
 
-        await new Promise((r) => setTimeout(r, 1200));
+        // ✅ Увеличена частота проверки до 2.5 секунд для более быстрого детектирования
+        await new Promise((r) => setTimeout(r, 2500));
       }
     } catch (err: any) {
       const t = book.get(task.id);
