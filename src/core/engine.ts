@@ -906,100 +906,164 @@ export async function runCommand(
         const posSize = Math.abs(my?.contracts ?? 0);
         const entryAvg = Number(my?.entryPrice ?? 0) || 0;
 
+        // ✅ КРИТИЧНО: Получаем ВСЕ открытые ордера, включая Algo Orders
         const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
-        const entriesLeft = open.filter((o: any) => o.id && keep.has(o.id)).length;
+        let algoOrders: any[] = [];
+        try {
+          algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+        } catch {}
+        
+        // Объединяем обычные и Algo ордера для проверки
+        // Algo Orders могут иметь algoId, orderId, или clientAlgoId
+        const allOpenOrders = [...open, ...algoOrders];
+        const allOpenOrderIds = new Set<string>();
+        for (const o of allOpenOrders) {
+          const id = String(o.id || o.algoId || o.orderId || "");
+          const clientId = String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "");
+          if (id) allOpenOrderIds.add(id);
+          if (clientId) allOpenOrderIds.add(clientId);
+        }
+        
+        // Проверяем какие входные ордера ещё открыты (по ID или clientOrderId)
+        const entriesLeft = entryIds.filter(id => {
+          const idStr = String(id);
+          return allOpenOrderIds.has(idStr) || 
+                 allOpenOrders.some((o: any) => 
+                   String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                 );
+        }).length;
         
         // ✅ НОВОЕ: Отслеживаем, были ли ордера когда-либо видны
-        const hasVisibleOrders = entryIds.some(id => open.some((o: any) => o.id === id));
+        const hasVisibleOrders = entryIds.some(id => {
+          const idStr = String(id);
+          return allOpenOrderIds.has(idStr) || 
+                 allOpenOrders.some((o: any) => 
+                   String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                 );
+        });
         if (hasVisibleOrders && !ordersEverSeen) {
           ordersEverSeen = true;
           firstSeenAt = Date.now();
         }
 
-        // === Исправлено: надёжное определение «снято вручную» ===
-        // ⚠️ КРИТИЧНО: Не проверяем исчезновение ордеров сразу после создания задачи (защита от race condition)
-        // НО: если ордер снят вручную после grace period - сразу обнаруживаем и удаляем
+        // === Улучшенное определение: ордер исполнился vs снят вручную ===
+        // ✅ КРИТИЧНО: Проверяем каждый входной ордер
         const taskAge = Date.now() - TASK_CREATED_AT;
-        const canCheckGone = taskAge >= MIN_TASK_AGE_MS;
-        // ✅ КРИТИЧНО: Ордера должны были быть видны хотя бы раз перед проверкой на исчезновение
-        const canCheckGoneSafe = canCheckGone && ordersEverSeen;
+        const canCheckGone = taskAge >= MIN_TASK_AGE_MS && ordersEverSeen;
         
         for (const id of [...keep]) {
-          const exists = open.some((o: any) => o.id === id);
+          const idStr = String(id);
+          // Проверяем по ID и по clientOrderId (для Algo Orders)
+          const exists = allOpenOrderIds.has(idStr) || 
+                        allOpenOrders.some((o: any) => 
+                          String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                        );
           if (exists) {
+            // Ордер ещё открыт - всё ОК
             gone.delete(id);
             continue;
           }
           
-          // не найден среди открытых
+          // Ордер исчез из списка открытых
           const rec = gone.get(id);
           if (!rec) {
-            // ⚠️ Защита: не начинаем отслеживать исчезновение ордеров сразу после создания
-            // И только если ордера были видны хотя бы раз
-            if (!canCheckGoneSafe) {
-              continue; // Пропускаем проверку, если задача только что создана или ордера не были видны
+            // Первое обнаружение исчезновения
+            if (!canCheckGone) {
+              continue; // Слишком рано для проверки
             }
-            // помечаем момент исчезновения
+            // Помечаем момент исчезновения и размер позиции на этот момент
             gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
             continue;
           }
+          
+          // Ордер уже был помечен как исчезнувший - проверяем что произошло
           const elapsed = Date.now() - rec.ts;
-          const increasedSinceGone = posSize > rec.sizeOnGone + 1e-9;
-
-          if (increasedSinceGone) {
-            // считаем, что ордер исполнился (позиция увеличилась)
-            keep.delete(id);
-            gone.delete(id);
-            continue;
-          }
+          const sizeOnGone = rec.sizeOnGone;
+          const increasedSinceGone = posSize > sizeOnGone + 1e-9;
+          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
 
           if (elapsed < MANUAL_GONE_GRACE_MS) {
-            // ждём подтверждения (4 секунды)
+            // Ещё ждём подтверждения (4 секунды)
             continue;
           }
 
-          // прошло достаточно времени и позиция не выросла — трактуем как снятый руками
-          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
-          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
-
-          if (flat) {
-            // Позиция пустая - ордер снят вручную, удаляем из keep
+          // Прошло достаточно времени - определяем что произошло
+          if (increasedSinceGone) {
+            // ✅ Позиция увеличилась - ордер ИСПОЛНИЛСЯ
             keep.delete(id);
             gone.delete(id);
-            // продолжаем цикл
-          } else {
-            // уже в позиции — ордер исполнился, удаляем из keep
-            keep.delete(id);
-            gone.delete(id);
+            continue;
           }
+
+          if (flat && sizeOnGone < minQty * 0.5) {
+            // ✅ Позиция была пустая и осталась пустой - ордер СНЯТ ВРУЧНУЮ
+            keep.delete(id);
+            gone.delete(id);
+            continue;
+          }
+
+          // Позиция есть, но не увеличилась - возможно частичное исполнение или другая ситуация
+          // Удаляем из keep, но не считаем снятым вручную
+          keep.delete(id);
+          gone.delete(id);
         }
 
-        // ✅ НОВЫЙ чек: если мы вне позиции и ВСЕ входные отложки этой задачи сняты — удаляем задачу
-        // НО: учитываем, что могут быть другие задачи на этот же символ!
-        // ⚠️ КРИТИЧНО: Не проверяем сразу после создания задачи (защита от race condition с API)
-        // НО: если ордера сняты вручную после grace period - удаляем задачу
+        // ✅ ПРОВЕРКА 1: Ручное закрытие позиции (позиция была, теперь её нет)
+        const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+        const flat = posSize < Math.max(minQty * 0.5, 1e-12);
+        const wasInPosition = lastSize > minQty * 0.5;
+        const manuallyClosed = wasInPosition && flat && taskAge >= 2000; // Минимум 2 секунды для защиты
+        
+        if (manuallyClosed) {
+          // Позиция была закрыта вручную - отменяем все ордера и удаляем задачу
+          await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
+          for (const id of keep) {
+            try {
+              await ex.cancelOrder(symbolCcxt, id).catch(() => {});
+            } catch {}
+            try {
+              await ex.cancelAlgoOrder(symbolCcxt, id).catch(() => {});
+            } catch {}
+          }
+          book.remove(task.id);
+          info(
+            mode === "console"
+              ? `🧹 Позиция закрыта вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
+              : `<b>🧹 Позиция закрыта вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
+          );
+          return;
+        }
+
+          // ✅ ПРОВЕРКА 2: Все входные ордера сняты вручную (позиции не было и нет)
         {
-          const taskAge = Date.now() - TASK_CREATED_AT;
-          const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
-          const flat = posSize < Math.max(minQty * 0.5, 1e-12);
+          // Проверяем что все ордера исчезли (по ID и clientOrderId)
+          const allOrdersGone = entryIds.length > 0 && entryIds.every(id => {
+            const idStr = String(id);
+            const foundById = allOpenOrderIds.has(idStr);
+            const foundByClientId = allOpenOrders.some((o: any) => 
+              String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+            );
+            return !foundById && !foundByClientId;
+          });
           
-          // ✅ КРИТИЧНО: Проверяем только если ордера были видны хотя бы раз (защита от ложных срабатываний)
-          // Проверяем только если:
-          // 1. Ордера были видны хотя бы раз (ordersEverSeen)
-          // 2. Прошло достаточно времени с момента первого обнаружения ордеров (минимум 5 секунд)
-          // 3. Все ордера исчезли из списка открытых
-          // 4. Все ордера исчезли из keep (сняты или исполнились)
-          // 5. Позиция пустая (flat)
-          const allOrdersGone = entryIds.length > 0 && entryIds.every(id => !open.some((o: any) => o.id === id));
           const timeSinceFirstSeen = ordersEverSeen ? Date.now() - firstSeenAt : Infinity;
+          
+          // Упрощённая проверка: если ордера были видны, исчезли, прошло время, позиции нет - значит сняты вручную
           const canRemove = flat && keep.size === 0 && entryIds.length > 0 && ordersEverSeen && 
-            allOrdersGone && timeSinceFirstSeen >= 5000; // Минимум 5 секунд после первого обнаружения
+            allOrdersGone && timeSinceFirstSeen >= 3000; // Минимум 3 секунды после первого обнаружения
           
           if (canRemove) {
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
             const otherHasActiveEntries = otherTasks.some(t => 
-              (t.entryOrderIds || []).some(id => open.some((o: any) => o.id === id))
+              (t.entryOrderIds || []).some(id => {
+                const idStr = String(id);
+                return allOpenOrderIds.has(idStr) || 
+                       allOpenOrders.some((o: any) => 
+                         String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                       );
+              })
             );
             
             if (!otherHasActiveEntries) {
@@ -1019,13 +1083,23 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
+        // ✅ КРИТИЧНО: Определяем срабатывание отложки
+        // Отложка сработала если:
+        // 1. Позиция появилась/увеличилась (increased или lastSize === 0 && posSize > 0)
+        // 2. И хотя бы один входной ордер исчез из списка открытых
+        const entryOrderFilled = entriesLeft < entryIds.length; // Хотя бы один ордер исчез
+        const positionAppeared = lastSize === 0 && posSize > 0;
+        const positionIncreased = increased && lastSize > 0;
+        
         // ✅ ИСПРАВЛЕНО: Выставляем TP/SL когда:
-        // 1. Позиция увеличилась (increased) - обычный случай
-        // 2. Позиция появилась впервые (lastSize === 0 && posSize > 0) - отложка сработала между циклами
-        // 3. Позиция есть, но TP/SL ещё не выставлены (!tpsPlaced || !slPxCurrent) - защита от пропуска
+        // 1. Позиция появилась впервые (positionAppeared) - отложка сработала
+        // 2. Позиция увеличилась (positionIncreased) - обычный случай
+        // 3. Входной ордер исчез и позиция есть (entryOrderFilled && posSize > 0) - отложка сработала между циклами
+        // 4. Позиция есть, но TP/SL ещё не выставлены - защита от пропуска
         const shouldPlaceTP_SL = posSize > 0 && (
-          increased || 
-          (lastSize === 0 && posSize > 0) || 
+          positionAppeared || 
+          positionIncreased || 
+          (entryOrderFilled && posSize > 0) ||
           (!tpsPlaced && entriesLeft === 0) ||
           (!slPxCurrent && posSize > 0)
         );
