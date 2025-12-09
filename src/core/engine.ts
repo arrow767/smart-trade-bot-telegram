@@ -972,11 +972,21 @@ export async function runCommand(
           if (exists) {
             // Ордер ещё открыт - всё ОК
             gone.delete(id);
+            if (mode === "console") {
+              console.log(`[DEBUG] Order ${id} still exists in open orders`);
+            }
             continue;
           }
           
-          // Ордер исчез из списка открытых
+          // ✅ Ордер исчез из списка открытых!
+          if (mode === "console") {
+            console.log(`[DEBUG] Order ${id} DISAPPEARED from open orders! posSize=${posSize}, canCheckGone=${canCheckGone}`);
+          }
+          
           if (!canCheckGone) {
+            if (mode === "console") {
+              console.log(`[DEBUG] Too early to check (taskAge=${taskAge}ms < 5000ms), waiting...`);
+            }
             continue; // Слишком рано для проверки
           }
           
@@ -984,6 +994,9 @@ export async function runCommand(
           if (!rec) {
             // Первое обнаружение исчезновения - запоминаем
             gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
+            if (mode === "console") {
+              console.log(`[DEBUG] Order ${id} marked as gone, waiting ${MANUAL_GONE_GRACE_MS}ms grace period...`);
+            }
             continue;
           }
           
@@ -995,6 +1008,9 @@ export async function runCommand(
 
           if (elapsed < MANUAL_GONE_GRACE_MS) {
             // Ещё ждём подтверждения (4 секунды)
+            if (mode === "console") {
+              console.log(`[DEBUG] Order ${id} still in grace period: elapsed=${elapsed}ms < ${MANUAL_GONE_GRACE_MS}ms`);
+            }
             continue;
           }
 
@@ -1004,7 +1020,7 @@ export async function runCommand(
             keep.delete(id);
             gone.delete(id);
             if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} filled: posSize increased from ${sizeOnGone} to ${posSize}`);
+              console.log(`[DEBUG] ✅ Order ${id} FILLED: posSize increased from ${sizeOnGone} to ${posSize}`);
             }
             continue;
           }
@@ -1013,7 +1029,7 @@ export async function runCommand(
           keep.delete(id);
           gone.delete(id);
           if (mode === "console") {
-            console.log(`[DEBUG] Order ${id} cancelled manually: posSize=${posSize}, sizeOnGone=${sizeOnGone}, flat=${flat}`);
+            console.log(`[DEBUG] ✅ Order ${id} CANCELLED MANUALLY: posSize=${posSize}, sizeOnGone=${sizeOnGone}, flat=${flat}`);
           }
         }
 
@@ -1057,18 +1073,23 @@ export async function runCommand(
           
           const timeSinceCreated = Date.now() - TASK_CREATED_AT;
           
+          // ✅ ИСПРАВЛЕНО: Проверяем сразу, не ждём пока keep очистится
           // Простая проверка:
           // 1. Позиция пустая (flat)
-          // 2. Все ордера удалены из keep (keep.size === 0)
-          // 3. Все ордера исчезли из списка открытых (allOrdersGone)
-          // 4. Прошло минимум 5 секунд после создания задачи
-          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && 
-            allOrdersGone && timeSinceCreated >= 5000;
+          // 2. Все ордера исчезли из списка открытых (allOrdersGone)
+          // 3. Прошло минимум 5 секунд после создания задачи
+          // 4. Ордера были видны хотя бы раз (ordersEverSeen) - защита от ложных срабатываний
+          const canRemove = flat && entryIds.length > 0 && 
+            allOrdersGone && timeSinceCreated >= 5000 && ordersEverSeen;
+          
+          if (mode === "console" && entryIds.length > 0) {
+            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, keep.size=${keep.size}, canRemove=${canRemove}`);
+          }
           
           if (canRemove) {
             // Логируем для отладки
             if (mode === "console") {
-              console.log(`[DEBUG] Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, timeSinceCreated=${timeSinceCreated}ms, allOrdersGone=${allOrdersGone}, keep.size=${keep.size}`);
+              console.log(`[DEBUG] ✅ Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, removing task...`);
             }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
@@ -1105,11 +1126,17 @@ export async function runCommand(
         const shouldPlaceTP_SL = posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent);
         
         // ✅ ЛОГИРОВАНИЕ для отладки
-        if (posSize > 0 && entryAvg > 0 && mode === "console") {
+        if (mode === "console") {
           console.log(`[DEBUG] Position check: posSize=${posSize}, entryAvg=${entryAvg}, lastSize=${lastSize}, entriesLeft=${entriesLeft}, tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
+          if (posSize > 0 && entryAvg > 0) {
+            console.log(`[DEBUG] ✅ POSITION DETECTED! Should place TP/SL: ${shouldPlaceTP_SL}`);
+          }
         }
 
         if (shouldPlaceTP_SL) {
+          if (mode === "console") {
+            console.log(`[DEBUG] 🚀 PLACING TP/SL: posSize=${posSize}, entryAvg=${entryAvg}`);
+          }
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
 
@@ -1140,11 +1167,12 @@ export async function runCommand(
               slPxCurrent = safeSL;
             }
 
-            // ✅ ИСПРАВЛЕНО: Выставляем TP если:
-            // 1. Все входы исполнились (entriesLeft === 0)
-            // 2. ИЛИ позиция появилась впервые (lastSize === 0 && posSize > 0) - отложка сработала
-            // 3. И TP ещё не выставлены (!tpsPlaced)
-            if (!tpsPlaced && (entriesLeft === 0 || (lastSize === 0 && posSize > 0))) {
+            // ✅ УПРОЩЕНО: Выставляем TP если они ещё не выставлены
+            // Не зависим от entriesLeft или lastSize - если позиция есть и TP не выставлены → выставляем
+            if (!tpsPlaced) {
+              if (mode === "console") {
+                console.log(`[DEBUG] 🚀 PLACING TP: entriesLeft=${entriesLeft}, lastSize=${lastSize}, posSize=${posSize}`);
+              }
               try {
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
                 const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
