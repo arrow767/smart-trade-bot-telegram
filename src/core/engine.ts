@@ -1317,12 +1317,24 @@ export async function runCommand(
         }
 
         // ✅ ИСПРАВЛЕНО: Финальная проверка завершения задачи (учитываем другие задачи на символ)
-        const nonEntryOpen = open.filter((o: any) => !(o.id && keep.has(o.id)));
+        // Используем allOpenOrders вместо open, чтобы учитывать Algo Orders
+        const nonEntryOpen = allOpenOrders.filter((o: any) => {
+          const oId = String(o.id || o.algoId || o.orderId || "");
+          const oClientId = String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "");
+          return !keep.has(oId) && !keep.has(oClientId);
+        });
+        
         if (posSize < 1e-12 && keep.size === 0) {
           // Проверяем, есть ли другие задачи с активными входами на этот символ
           const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
           const otherHasActiveOrders = otherTasks.some(t => 
-            (t.entryOrderIds || []).some(id => open.some((o: any) => o.id === id))
+            (t.entryOrderIds || []).some(id => {
+              const idStr = String(id);
+              return allOpenOrderIds.has(idStr) || 
+                     allOpenOrders.some((o: any) => 
+                       String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                     );
+            })
           );
           
           // Удаляем задачу только если:
@@ -1336,8 +1348,19 @@ export async function runCommand(
           }
         }
 
+        // ✅ ИСПРАВЛЕНО: Используем allOpenOrders вместо open, чтобы учитывать Algo Orders
         for (const id of [...keep]) {
-          if (!open.find((o: any) => o.id === id)) keep.delete(id);
+          const idStr = String(id);
+          const exists = allOpenOrderIds.has(idStr) || 
+                        allOpenOrders.some((o: any) => 
+                          String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                        );
+          if (!exists) {
+            keep.delete(id);
+            if (mode === "console") {
+              console.log(`[DEBUG] Order ${id} not found in allOpenOrders, removed from keep`);
+            }
+          }
         }
 
         // ✅ Увеличена частота проверки до 2.5 секунд для более быстрого детектирования
