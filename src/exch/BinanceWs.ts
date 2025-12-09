@@ -174,7 +174,8 @@ export class BinanceWs {
       });
 
       this.ws.on("close", (code: number, reason: Buffer) => {
-        console.log(`[WS] Connection closed: ${code} ${reason.toString()}`);
+        const reasonStr = reason.toString();
+        console.log(`[WS] Connection closed: ${code} ${reasonStr}`);
         this.isConnected = false;
         this.isConnecting = false;
         this.onDisconnect?.();
@@ -185,9 +186,13 @@ export class BinanceWs {
           this.keepAliveInterval = null;
         }
 
-        // Переподключаемся если не было явного закрытия (1000 = нормальное закрытие)
-        if (code !== 1000) {
-          console.log(`[WS] Unexpected close (code=${code}), scheduling reconnect...`);
+        // Переподключаемся если:
+        // 1. Не было явного закрытия (code !== 1000)
+        // 2. ИЛИ это было закрытие из-за истечения listenKey (reason содержит "listenKey")
+        const isListenKeyExpired = reasonStr.includes("listenKey") || reasonStr.includes("expired");
+        
+        if (code !== 1000 || isListenKeyExpired) {
+          console.log(`[WS] ${isListenKeyExpired ? "listenKey expired" : "Unexpected close"} (code=${code}), scheduling reconnect...`);
           this.scheduleReconnect();
         } else {
           console.log(`[WS] Normal close (code=1000), not reconnecting`);
@@ -208,7 +213,44 @@ export class BinanceWs {
     // Логируем все сообщения для отладки
     console.log(`[WS] Received message:`, JSON.stringify(message, null, 2));
     
-    // ORDER_TRADE_UPDATE - обновления ордеров
+    // ✅ НОВОЕ: ALGO_UPDATE - обновления Algo Orders (STOP_MARKET, TAKE_PROFIT_MARKET и т.д.)
+    if (message.e === "ALGO_UPDATE") {
+      const algoData = message.o;
+      const orderId = String(algoData.aid || algoData.algoId || "");
+      const clientOrderId = String(algoData.caid || algoData.clientAlgoId || "");
+      const status = String(algoData.X || algoData.status || "");
+      
+      console.log(`[WS] 🔔 ALGO_UPDATE:`, {
+        symbol: algoData.s,
+        orderId,
+        clientOrderId,
+        status,
+        type: algoData.o,
+        algoType: algoData.at,
+        side: algoData.S,
+        triggerPrice: algoData.tp,
+        qty: algoData.q,
+        time: new Date(message.E).toISOString(),
+      });
+      
+      // Преобразуем в формат совместимый с ORDER_TRADE_UPDATE для единой обработки
+      const orderData = {
+        s: algoData.s, // symbol
+        i: orderId, // orderId
+        c: clientOrderId, // clientOrderId
+        X: status, // status
+        o: algoData.o, // orderType
+        S: algoData.S, // side
+        p: algoData.p || algoData.tp, // price or triggerPrice
+        q: algoData.q, // quantity
+        z: "0", // executedQty (для Algo Orders всегда 0 до срабатывания)
+        T: message.E, // transactionTime
+      };
+      
+      this.onOrderUpdate?.(orderData);
+    }
+    
+    // ORDER_TRADE_UPDATE - обновления обычных ордеров
     if (message.e === "ORDER_TRADE_UPDATE") {
       const orderData = message.o;
       console.log(`[WS] 🔔 ORDER_TRADE_UPDATE:`, {
@@ -236,8 +278,18 @@ export class BinanceWs {
       this.onAccountUpdate?.(message.a);
     }
     
+    // ✅ НОВОЕ: listenKeyExpired - нужно переподключиться с новым listenKey
+    if (message.e === "listenKeyExpired") {
+      console.log(`[WS] ⚠️ listenKey expired, reconnecting...`);
+      // Закрываем текущее соединение и переподключаемся
+      if (this.ws) {
+        this.ws.close(1000, "listenKey expired");
+      }
+      // Переподключение произойдёт автоматически через обработчик close
+    }
+    
     // Если это не известное событие - просто логируем
-    if (message.e && message.e !== "ORDER_TRADE_UPDATE" && message.e !== "ACCOUNT_UPDATE") {
+    if (message.e && !["ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "ALGO_UPDATE", "listenKeyExpired"].includes(message.e)) {
       console.log(`[WS] ⚠️ Unknown event type: ${message.e}`);
     }
   }
