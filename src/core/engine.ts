@@ -872,6 +872,10 @@ export async function runCommand(
       const TASK_CREATED_AT = Date.now();
       const MIN_TASK_AGE_MS = 10000; // Минимум 10 секунд должно пройти перед проверкой на "снято вручную"
       
+      // ✅ НОВОЕ: Отслеживание, были ли ордера когда-либо видны в списке открытых
+      let ordersEverSeen = false;
+      let firstSeenAt = 0;
+      
       // ✅ НОВОЕ: Периодическая очистка висячих tasks (каждые 30 сек)
       let lastCleanupTs = Date.now();
       const CLEANUP_INTERVAL_MS = 30_000;
@@ -904,12 +908,21 @@ export async function runCommand(
 
         const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
         const entriesLeft = open.filter((o: any) => o.id && keep.has(o.id)).length;
+        
+        // ✅ НОВОЕ: Отслеживаем, были ли ордера когда-либо видны
+        const hasVisibleOrders = entryIds.some(id => open.some((o: any) => o.id === id));
+        if (hasVisibleOrders && !ordersEverSeen) {
+          ordersEverSeen = true;
+          firstSeenAt = Date.now();
+        }
 
         // === Исправлено: надёжное определение «снято вручную» ===
         // ⚠️ КРИТИЧНО: Не проверяем исчезновение ордеров сразу после создания задачи (защита от race condition)
         // НО: если ордер снят вручную после grace period - сразу обнаруживаем и удаляем
         const taskAge = Date.now() - TASK_CREATED_AT;
         const canCheckGone = taskAge >= MIN_TASK_AGE_MS;
+        // ✅ КРИТИЧНО: Ордера должны были быть видны хотя бы раз перед проверкой на исчезновение
+        const canCheckGoneSafe = canCheckGone && ordersEverSeen;
         
         for (const id of [...keep]) {
           const exists = open.some((o: any) => o.id === id);
@@ -922,8 +935,9 @@ export async function runCommand(
           const rec = gone.get(id);
           if (!rec) {
             // ⚠️ Защита: не начинаем отслеживать исчезновение ордеров сразу после создания
-            if (!canCheckGone) {
-              continue; // Пропускаем проверку, если задача только что создана
+            // И только если ордера были видны хотя бы раз
+            if (!canCheckGoneSafe) {
+              continue; // Пропускаем проверку, если задача только что создана или ордера не были видны
             }
             // помечаем момент исчезновения
             gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
@@ -969,15 +983,17 @@ export async function runCommand(
           const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const flat = posSize < Math.max(minQty * 0.5, 1e-12);
           
+          // ✅ КРИТИЧНО: Проверяем только если ордера были видны хотя бы раз (защита от ложных срабатываний)
           // Проверяем только если:
-          // 1. Прошло достаточно времени с момента создания задачи (защита от race condition)
-          //    ИЛИ все ордера исчезли из списка открытых (сняты вручную)
-          // 2. Ордера действительно были созданы (entryIds не пустой)
-          // 3. Все ордера исчезли из keep (сняты или исполнились)
-          // 4. Позиция пустая (flat)
+          // 1. Ордера были видны хотя бы раз (ordersEverSeen)
+          // 2. Прошло достаточно времени с момента первого обнаружения ордеров (минимум 5 секунд)
+          // 3. Все ордера исчезли из списка открытых
+          // 4. Все ордера исчезли из keep (сняты или исполнились)
+          // 5. Позиция пустая (flat)
           const allOrdersGone = entryIds.length > 0 && entryIds.every(id => !open.some((o: any) => o.id === id));
-          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && 
-            (taskAge >= MIN_TASK_AGE_MS || (allOrdersGone && taskAge >= 2000)); // Минимум 2 секунды для защиты от race condition
+          const timeSinceFirstSeen = ordersEverSeen ? Date.now() - firstSeenAt : Infinity;
+          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && ordersEverSeen && 
+            allOrdersGone && timeSinceFirstSeen >= 5000; // Минимум 5 секунд после первого обнаружения
           
           if (canRemove) {
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
@@ -1003,9 +1019,16 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
-        // ✅ ИСПРАВЛЕНО: Выставляем TP/SL не только при увеличении позиции, но и при первом обнаружении позиции
-        // Это важно, если отложка сработала между циклами и позиция уже открыта
-        const shouldPlaceTP_SL = posSize > 0 && (increased || (lastSize === 0 && posSize > 0));
+        // ✅ ИСПРАВЛЕНО: Выставляем TP/SL когда:
+        // 1. Позиция увеличилась (increased) - обычный случай
+        // 2. Позиция появилась впервые (lastSize === 0 && posSize > 0) - отложка сработала между циклами
+        // 3. Позиция есть, но TP/SL ещё не выставлены (!tpsPlaced || !slPxCurrent) - защита от пропуска
+        const shouldPlaceTP_SL = posSize > 0 && (
+          increased || 
+          (lastSize === 0 && posSize > 0) || 
+          (!tpsPlaced && entriesLeft === 0) ||
+          (!slPxCurrent && posSize > 0)
+        );
 
         if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
@@ -1038,22 +1061,38 @@ export async function runCommand(
               slPxCurrent = safeSL;
             }
 
-            // ✅ ИСПРАВЛЕНО: Выставляем TP если все входы исполнились ИЛИ позиция уже открыта (отложка сработала)
-            if ((entriesLeft === 0 || (lastSize === 0 && posSize > 0)) && !tpsPlaced) {
-              const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-              const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
+            // ✅ ИСПРАВЛЕНО: Выставляем TP если:
+            // 1. Все входы исполнились (entriesLeft === 0)
+            // 2. ИЛИ позиция появилась впервые (lastSize === 0 && posSize > 0) - отложка сработала
+            // 3. И TP ещё не выставлены (!tpsPlaced)
+            if (!tpsPlaced && (entriesLeft === 0 || (lastSize === 0 && posSize > 0))) {
+              try {
+                const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
+                const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
 
-              let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
-              tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
-              tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
-              for (let i = 0; i < re.tpPrices.length; i++) {
-                const q = tpQtys[i];
-                if (q <= 0) continue;
-                const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-                const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
-                if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
+                let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
+                tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+                tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                for (let i = 0; i < re.tpPrices.length; i++) {
+                  const q = tpQtys[i];
+                  if (q <= 0) continue;
+                  const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                  const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
+                  if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
+                }
+                tpsPlaced = true;
+                info(mode === "console" 
+                  ? `✅ TP выставлены: ${re.tpPrices.length} ордеров`
+                  : `<b>✅ TP выставлены:</b> ${re.tpPrices.length} ордеров`
+                );
+              } catch (e: any) {
+                console.error(`Failed to place TP: ${e?.message || e}`);
+                const errMsg = String(e?.message || e || "Unknown error");
+                info(mode === "console" 
+                  ? `⚠️ Ошибка выставления TP: ${errMsg}`
+                  : `<b>⚠️ Ошибка выставления TP:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                );
               }
-              tpsPlaced = true;
             }
 
             const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
