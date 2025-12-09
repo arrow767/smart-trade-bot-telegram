@@ -857,6 +857,9 @@ export async function runCommand(
   book.set(task, "waiting_fill");
 
   (async () => {
+    // ✅ НОВОЕ: WebSocket для отслеживания событий в реальном времени (объявлен вне try для доступа в finally)
+    let ws: BinanceWs | null = null;
+    
     try {
       const keep = new Set(entryIds);
       let lastSize = 0;
@@ -864,6 +867,97 @@ export async function runCommand(
       let tpsPlaced = false;
       let slPxCurrent: number | undefined;
       const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
+
+      // ✅ НОВОЕ: Инициализация WebSocket для отслеживания событий в реальном времени
+      const apiKey = ex.getApiKey();
+      const secret = ex.getSecret();
+      
+      if (apiKey && secret) {
+        try {
+          ws = new BinanceWs(apiKey, secret);
+          
+          // Обработка обновлений ордеров
+          ws.setOnOrderUpdate((orderData: any) => {
+            const orderId = String(orderData.i || orderData.orderId || "");
+            const clientOrderId = String(orderData.c || orderData.clientOrderId || "");
+            const status = String(orderData.X || orderData.status || "");
+            const symbol = String(orderData.s || "");
+            
+            // Проверяем, относится ли это к нашим входным ордерам
+            const isOurOrder = entryIds.some(id => 
+              String(id) === orderId || String(id) === clientOrderId
+            );
+            
+            if (isOurOrder && symbol === symbolCcxt) {
+              console.log(`[WS] 🔔 Order update for our entry order:`, {
+                orderId,
+                clientOrderId,
+                status,
+                symbol,
+                executedQty: orderData.z,
+                price: orderData.p,
+              });
+              
+              // Если ордер отменён (CANCELED) - удаляем из keep
+              if (status === "CANCELED" || status === "EXPIRED") {
+                if (orderId) keep.delete(orderId);
+                if (clientOrderId) keep.delete(clientOrderId);
+                console.log(`[WS] ✅ Order ${orderId || clientOrderId} cancelled, removed from keep`);
+              }
+              
+              // Если ордер исполнен (FILLED) - удаляем из keep
+              if (status === "FILLED") {
+                if (orderId) keep.delete(orderId);
+                if (clientOrderId) keep.delete(clientOrderId);
+                console.log(`[WS] ✅ Order ${orderId || clientOrderId} filled, removed from keep`);
+              }
+            }
+          });
+          
+          // Обработка обновлений позиций
+          ws.setOnAccountUpdate((accountData: any) => {
+            if (accountData.P) {
+              // P - массив позиций
+              const ourPosition = accountData.P.find((p: any) => 
+                String(p.s || "").replace("USDT", ":USDT") === symbolCcxt
+              );
+              
+              if (ourPosition) {
+                const posSize = Math.abs(Number(ourPosition.pa || 0));
+                const entryAvg = Number(ourPosition.ep || 0);
+                
+                console.log(`[WS] 🔔 Position update:`, {
+                  symbol: ourPosition.s,
+                  posSize,
+                  entryAvg,
+                });
+                
+                // Если позиция появилась - триггерим проверку TP/SL
+                if (posSize > 0 && entryAvg > 0) {
+                  console.log(`[WS] ✅ Position detected via WS, will check TP/SL in next cycle`);
+                }
+              }
+            }
+          });
+          
+          ws.setOnError((error: Error) => {
+            console.error(`[WS] Error: ${error.message}`);
+          });
+          
+          ws.setOnConnect(() => {
+            console.log(`[WS] ✅ Connected to Binance User Data Stream`);
+          });
+          
+          ws.setOnDisconnect(() => {
+            console.log(`[WS] ⚠️ Disconnected from Binance User Data Stream`);
+          });
+          
+          await ws.connect();
+        } catch (wsError: any) {
+          console.warn(`[WS] Failed to connect WebSocket: ${wsError.message}`);
+          ws = null;
+        }
+      }
 
       // НОВОЕ: учёт исчезнувших входов с задержкой-подтверждением
       const MANUAL_GONE_GRACE_MS = 4000;
@@ -880,6 +974,9 @@ export async function runCommand(
       // ✅ НОВОЕ: Периодическая очистка висячих tasks (каждые 30 сек)
       let lastCleanupTs = Date.now();
       const CLEANUP_INTERVAL_MS = 30_000;
+      
+      // ✅ НОВОЕ: Время создания задачи для проверки возраста
+      const TASK_CREATED_AT = Date.now();
 
       for (;;) {
         if (book.get(task.id)?.cancelRequested) {
