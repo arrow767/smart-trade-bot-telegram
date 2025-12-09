@@ -32,12 +32,14 @@ export async function collectSymbolsForOrders(ex: BinanceFutures, book: TaskBook
 
 /**
  * Снять только стоп-лоссы (closePosition/stop), не трогая входы/ТП
+ * ⚠️ ОБНОВЛЕНО 2024-12-09: Также проверяет Algo Orders
  */
 export async function cancelOnlySL(
   ex: BinanceFutures,
   symbolCcxt: string,
   keepIds: Set<string>
 ) {
+  // 1. Проверяем обычные ордера (legacy)
   const open = await ex.fetchOpenOrders(symbolCcxt);
   for (const o of open) {
     const isEntry = o.id && keepIds.has(o.id);
@@ -50,21 +52,53 @@ export async function cancelOnlySL(
       try { await ex.cancelOrder(symbolCcxt, o.id!); } catch {}
     }
   }
+  
+  // 2. Проверяем Algo Orders (новый API с 9 декабря 2024)
+  try {
+    const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+    for (const ao of algoOrders) {
+      const algoId = ao.algoId || ao.orderId;
+      if (!algoId) continue;
+      // Проверяем, не входной ли это ордер
+      if (keepIds.has(String(algoId))) continue;
+      
+      const t = String(ao.type || ao.strategyType || "").toUpperCase();
+      const isClose = ao.closePosition === true || ao.closePosition === "true";
+      
+      // Снимаем STOP_MARKET с closePosition=true
+      if (isClose && t.includes("STOP")) {
+        try { await ex.cancelAlgoOrder(symbolCcxt, algoId); } catch {}
+      }
+    }
+  } catch {}
 }
 
 /**
  * Снять SL и TP, не трогая входы
+ * ⚠️ ОБНОВЛЕНО 2024-12-09: Также отменяет Algo Orders
  */
 export async function cancelBracketOnly(
   ex: BinanceFutures,
   symbolCcxt: string,
   keepIds: Set<string>
 ) {
+  // 1. Отменяем обычные ордера
   const open = await ex.fetchOpenOrders(symbolCcxt);
   for (const o of open) {
     if (o.id && keepIds.has(o.id)) continue;
     try { await ex.cancelOrder(symbolCcxt, o.id!); } catch {}
   }
+  
+  // 2. Отменяем Algo Orders (новый API с 9 декабря 2024)
+  try {
+    const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+    for (const ao of algoOrders) {
+      const algoId = ao.algoId || ao.orderId;
+      if (!algoId) continue;
+      if (keepIds.has(String(algoId))) continue;
+      try { await ex.cancelAlgoOrder(symbolCcxt, algoId); } catch {}
+    }
+  } catch {}
 }
 
 /**

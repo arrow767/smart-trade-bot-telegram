@@ -1,4 +1,5 @@
 import ccxt from "ccxt";
+import crypto from "crypto";
 
 export type SymbolFilters = {
   minQty: number;
@@ -47,6 +48,15 @@ function rid(prefix: string) {
   const ts = Date.now().toString(36);
   return `${prefix}_${ts}_${rand}`;
 }
+
+// ====== ALGO ORDER API TYPES ======
+export type AlgoOrderResult = {
+  algoId: string;
+  clientAlgoId: string;
+  success: boolean;
+  code: number;
+  msg: string;
+};
 
 export class BinanceFutures {
   private fapi: ccxt.binanceusdm;
@@ -443,6 +453,153 @@ export class BinanceFutures {
     });
   }
 
+  // ====== ALGO ORDER API (новый API с 9 декабря 2024) ======
+  
+  private readonly ALGO_ORDER_BASE_URL = "https://fapi.binance.com";
+  
+  /**
+   * Создаёт HMAC SHA256 подпись для запроса
+   */
+  private signQuery(queryString: string): string {
+    if (!this.secret) throw new Error("API secret is required for signing");
+    return crypto.createHmac("sha256", this.secret).update(queryString).digest("hex");
+  }
+  
+  /**
+   * Базовый метод для вызова Algo Order API
+   */
+  private async algoOrderRequest(
+    method: "POST" | "DELETE" | "GET",
+    endpoint: string,
+    params: Record<string, any>
+  ): Promise<any> {
+    this.ensureKeysOrThrow();
+    await this.syncServerTime(false);
+    
+    // Добавляем timestamp и recvWindow
+    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
+    const timestamp = Date.now() + ((this.fapi as any).timeDifference || 0);
+    
+    const allParams = {
+      ...params,
+      timestamp,
+      recvWindow,
+    };
+    
+    // Создаём query string и подписываем
+    const queryString = Object.entries(allParams)
+      .filter(([_, v]) => v !== undefined && v !== null)
+      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+      .join("&");
+    
+    const signature = this.signQuery(queryString);
+    const signedQuery = `${queryString}&signature=${signature}`;
+    
+    const url = `${this.ALGO_ORDER_BASE_URL}${endpoint}?${signedQuery}`;
+    
+    const response = await fetch(url, {
+      method,
+      headers: {
+        "X-MBX-APIKEY": this.apiKey!,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      const err = new Error(`Algo Order API error: ${JSON.stringify(data)}`);
+      (err as any).code = data?.code;
+      (err as any).msg = data?.msg;
+      throw err;
+    }
+    
+    return data;
+  }
+  
+  /**
+   * ✅ НОВОЕ: Создание условного ордера через Algo Order API
+   * Типы: STOP, STOP_MARKET, TAKE_PROFIT, TAKE_PROFIT_MARKET
+   */
+  async createAlgoOrder(params: {
+    symbol: string;
+    side: "BUY" | "SELL";
+    type: "STOP" | "STOP_MARKET" | "TAKE_PROFIT" | "TAKE_PROFIT_MARKET";
+    quantity?: number;
+    price?: number;
+    stopPrice: number;
+    closePosition?: boolean;
+    reduceOnly?: boolean;
+    workingType?: "MARK_PRICE" | "CONTRACT_PRICE";
+    priceProtect?: boolean;
+    newClientOrderId?: string;
+  }): Promise<AlgoOrderResult> {
+    const m: any = this.fapi.market(params.symbol);
+    
+    const apiParams: Record<string, any> = {
+      symbol: m.id,
+      side: params.side,
+      type: params.type,
+      stopPrice: this.fapi.priceToPrecision(params.symbol, params.stopPrice),
+      workingType: params.workingType || "CONTRACT_PRICE",
+    };
+    
+    if (params.quantity !== undefined) {
+      apiParams.quantity = this.fapi.amountToPrecision(params.symbol, params.quantity);
+    }
+    if (params.price !== undefined) {
+      apiParams.price = this.fapi.priceToPrecision(params.symbol, params.price);
+    }
+    if (params.closePosition !== undefined) {
+      apiParams.closePosition = params.closePosition ? "true" : "false";
+    }
+    if (params.reduceOnly !== undefined) {
+      apiParams.reduceOnly = params.reduceOnly ? "true" : "false";
+    }
+    if (params.priceProtect !== undefined) {
+      apiParams.priceProtect = params.priceProtect ? "true" : "false";
+    }
+    if (params.newClientOrderId) {
+      apiParams.newClientOrderId = params.newClientOrderId;
+    }
+    
+    return this.withRetry(() => this.algoOrderRequest("POST", "/fapi/v1/algoOrder", apiParams));
+  }
+  
+  /**
+   * ✅ Отмена Algo Order по algoId
+   */
+  async cancelAlgoOrder(symbol: string, algoId: string): Promise<any> {
+    const m: any = this.fapi.market(symbol);
+    return this.withRetry(() => this.algoOrderRequest("DELETE", "/fapi/v1/algoOrder", {
+      symbol: m.id,
+      algoId,
+    }));
+  }
+  
+  /**
+   * ✅ Отмена всех открытых Algo Orders для символа
+   */
+  async cancelAllAlgoOrders(symbol: string): Promise<any> {
+    const m: any = this.fapi.market(symbol);
+    return this.withRetry(() => this.algoOrderRequest("DELETE", "/fapi/v1/algoOpenOrders", {
+      symbol: m.id,
+    }));
+  }
+  
+  /**
+   * ✅ Получить открытые Algo Orders
+   */
+  async fetchOpenAlgoOrders(symbol?: string): Promise<any[]> {
+    const params: Record<string, any> = {};
+    if (symbol) {
+      const m: any = this.fapi.market(symbol);
+      params.symbol = m.id;
+    }
+    const result = await this.withRetry(() => this.algoOrderRequest("GET", "/fapi/v1/openAlgoOrders", params));
+    return Array.isArray(result?.orders) ? result.orders : (Array.isArray(result) ? result : []);
+  }
+
   // ====== Создание ордеров (с идемпотентностью и ретраями) ======
 
   // LIMIT (вход/ТП)
@@ -471,28 +628,58 @@ export class BinanceFutures {
   }
 
   // ✅ STOP-MARKET ВХОД (срабатываем по stopPrice, исполняем по рынку)
+  // ⚠️ ОБНОВЛЕНО 2024-12-09: Использует новый Algo Order API
   async createStopMarketEntry(symbol: string, side: "buy"|"sell", amount: number, stopPrice: number) {
     this.ensureKeysOrThrow();
     const clientOrderId = rid("SME");
-    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
-    const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase(); // "CONTRACT_PRICE" | "MARK_PRICE"
-    const place = async () => this.fapi.createOrder(symbol, "STOP_MARKET" as any, side, amount, undefined, {
-      stopPrice,
-      workingType,          // ⬅️ по умолчанию last/contract price для более быстрого триггера
-      priceProtect: false,  // ⬅️ без защиты, чтобы не задерживать триггер
-      reduceOnly: false,
-      newClientOrderId: clientOrderId,
-      recvWindow,
-    });
+    const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase() as "CONTRACT_PRICE" | "MARK_PRICE";
+    
     try {
-      const r = await this.withRetry(place);
+      const result = await this.createAlgoOrder({
+        symbol,
+        side: side.toUpperCase() as "BUY" | "SELL",
+        type: "STOP_MARKET",
+        quantity: amount,
+        stopPrice,
+        workingType,
+        priceProtect: false,
+        reduceOnly: false,
+        newClientOrderId: clientOrderId,
+      });
+      
       this.clearOrderCache(symbol);
       this.clearTickerCache(symbol);
-      return r;
+      
+      // Возвращаем в формате, совместимом со старым API
+      return {
+        id: result.algoId || result.clientAlgoId || clientOrderId,
+        clientOrderId: result.clientAlgoId || clientOrderId,
+        info: result,
+        symbol,
+        side,
+        type: "STOP_MARKET",
+        amount,
+        stopPrice,
+      };
     } catch (e: any) {
+      // Проверяем, может ордер всё-таки создался
       if (isTimeoutOrUnknown(e)) {
-        const exists = await this.findOpenByClientId(symbol, clientOrderId);
-        if (exists) return exists;
+        const algoOrders = await this.fetchOpenAlgoOrders(symbol).catch(() => []);
+        const exists = algoOrders.find((o: any) => 
+          o.clientAlgoId === clientOrderId || o.newClientOrderId === clientOrderId
+        );
+        if (exists) {
+          return {
+            id: exists.algoId || clientOrderId,
+            clientOrderId,
+            info: exists,
+            symbol,
+            side,
+            type: "STOP_MARKET",
+            amount,
+            stopPrice,
+          };
+        }
       }
       throw e;
     }
@@ -528,28 +715,57 @@ export class BinanceFutures {
   }
 
   // ✅ STOP-MARKET СТОП-ЛОСС (закрытие всей позиции) — БЕЗ reduceOnly!
+  // ⚠️ ОБНОВЛЕНО 2024-12-09: Использует новый Algo Order API
   async createStopMarketClose(symbol: string, side: "buy"|"sell", stopPrice: number) {
     this.ensureKeysOrThrow();
     const clientOrderId = rid("SLC");
-    const recvWindow = Number(process.env.BINANCE_RECV_WINDOW || 60_000);
-    const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase();
-    const place = async () => this.fapi.createOrder(symbol, "STOP_MARKET" as any, side, undefined, undefined, {
-      closePosition: true,
-      stopPrice,
-      workingType,          // ⬅️ быстрый триггер по last/contract
-      priceProtect: false,  // ⬅️ без защитной задержки
-      newClientOrderId: clientOrderId,
-      recvWindow,
-    });
+    const workingType = String(process.env.BINANCE_STOP_WORKING_TYPE || "CONTRACT_PRICE").toUpperCase() as "CONTRACT_PRICE" | "MARK_PRICE";
+    
     try {
-      const r = await this.withRetry(place);
+      const result = await this.createAlgoOrder({
+        symbol,
+        side: side.toUpperCase() as "BUY" | "SELL",
+        type: "STOP_MARKET",
+        stopPrice,
+        closePosition: true,
+        workingType,
+        priceProtect: false,
+        newClientOrderId: clientOrderId,
+      });
+      
       this.clearOrderCache(symbol);
       this.clearTickerCache(symbol);
-      return r;
+      
+      // Возвращаем в формате, совместимом со старым API
+      return {
+        id: result.algoId || result.clientAlgoId || clientOrderId,
+        clientOrderId: result.clientAlgoId || clientOrderId,
+        info: result,
+        symbol,
+        side,
+        type: "STOP_MARKET",
+        stopPrice,
+        closePosition: true,
+      };
     } catch (e: any) {
+      // Проверяем, может ордер всё-таки создался
       if (isTimeoutOrUnknown(e)) {
-        const exists = await this.findOpenByClientId(symbol, clientOrderId);
-        if (exists) return exists;
+        const algoOrders = await this.fetchOpenAlgoOrders(symbol).catch(() => []);
+        const exists = algoOrders.find((o: any) => 
+          o.clientAlgoId === clientOrderId || o.newClientOrderId === clientOrderId
+        );
+        if (exists) {
+          return {
+            id: exists.algoId || clientOrderId,
+            clientOrderId,
+            info: exists,
+            symbol,
+            side,
+            type: "STOP_MARKET",
+            stopPrice,
+            closePosition: true,
+          };
+        }
       }
       throw e;
     }
