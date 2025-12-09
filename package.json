@@ -11,11 +11,13 @@
     "show:bounds": "tsx --env-file=.env src/tools/showSymbolBounds.ts"
   },
   "dependencies": {
+    "@types/ws": "^8.18.1",
     "ccxt": "^4.3.0",
     "dotenv": "^16.4.5",
-    "telegraf": "^4.16.3",
     "https-proxy-agent": "^7.0.4",
-    "socks-proxy-agent": "^8.0.3"
+    "socks-proxy-agent": "^8.0.3",
+    "telegraf": "^4.16.3",
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",

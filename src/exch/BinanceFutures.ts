@@ -111,6 +111,15 @@ export class BinanceFutures {
     } as any);
   }
 
+  // ✅ НОВОЕ: Методы для доступа к ключам (для WebSocket)
+  getApiKey(): string | undefined {
+    return this.apiKey;
+  }
+
+  getSecret(): string | undefined {
+    return this.secret;
+  }
+
   // ——— Инициализация: синхронизация времени перед первым использованием ———
   async init() {
     console.log("🔄 Синхронизация времени с Binance...");

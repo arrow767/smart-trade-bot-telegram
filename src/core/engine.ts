@@ -9,6 +9,7 @@
 } from "../config/trading_config";
 import { normalizeTickerToUsdt } from "./SymbolResolver";
 import { BinanceFutures } from "../exch/BinanceFutures";
+import { BinanceWs } from "../exch/BinanceWs";
 import { planTargets } from "./Planner";
 import { splitQtyToStep, mergeDustToPrev } from "../utils/math";
 import {
@@ -1255,6 +1256,13 @@ export async function runCommand(
         t.updatedAt = new Date();
       }
       info(`❌ [ERROR] ${err?.message ?? err}`);
+    } finally {
+      // Отключаем WebSocket при завершении задачи
+      if (ws) {
+        await ws.disconnect().catch((e) => {
+          console.warn(`[WS] Failed to disconnect: ${e}`);
+        });
+      }
     }
   })();
 
