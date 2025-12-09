@@ -911,7 +911,11 @@ export async function runCommand(
         let algoOrders: any[] = [];
         try {
           algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
-        } catch {}
+        } catch (e) {
+          if (mode === "console") {
+            console.log(`[DEBUG] Failed to fetch Algo Orders: ${e}`);
+          }
+        }
         
         // Объединяем обычные и Algo ордера для проверки
         // Algo Orders могут иметь algoId, orderId, или clientAlgoId
@@ -922,6 +926,13 @@ export async function runCommand(
           const clientId = String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "");
           if (id) allOpenOrderIds.add(id);
           if (clientId) allOpenOrderIds.add(clientId);
+        }
+        
+        // ✅ ЛОГИРОВАНИЕ: что мы получили с биржи
+        if (mode === "console" && (posSize > 0 || entryIds.length > 0)) {
+          console.log(`[DEBUG] Fetched orders: regular=${open.length}, algo=${algoOrders.length}, allOpenOrderIds.size=${allOpenOrderIds.size}`);
+          console.log(`[DEBUG] Entry IDs we're tracking: ${Array.from(entryIds).join(", ")}`);
+          console.log(`[DEBUG] All open order IDs: ${Array.from(allOpenOrderIds).join(", ")}`);
         }
         
         // Проверяем какие входные ордера ещё открыты (по ID или clientOrderId)
@@ -946,10 +957,10 @@ export async function runCommand(
           firstSeenAt = Date.now();
         }
 
-        // === Улучшенное определение: ордер исполнился vs снят вручную ===
-        // ✅ КРИТИЧНО: Проверяем каждый входной ордер
+        // === УПРОЩЁННОЕ определение: ордер исполнился vs снят вручную ===
+        // ✅ Простая логика: если ордер исчез и позиция не появилась → снят вручную
         const taskAge = Date.now() - TASK_CREATED_AT;
-        const canCheckGone = taskAge >= MIN_TASK_AGE_MS && ordersEverSeen;
+        const canCheckGone = taskAge >= 5000; // Минимум 5 секунд после создания
         
         for (const id of [...keep]) {
           const idStr = String(id);
@@ -965,13 +976,13 @@ export async function runCommand(
           }
           
           // Ордер исчез из списка открытых
+          if (!canCheckGone) {
+            continue; // Слишком рано для проверки
+          }
+          
           const rec = gone.get(id);
           if (!rec) {
-            // Первое обнаружение исчезновения
-            if (!canCheckGone) {
-              continue; // Слишком рано для проверки
-            }
-            // Помечаем момент исчезновения и размер позиции на этот момент
+            // Первое обнаружение исчезновения - запоминаем
             gone.set(id, { ts: Date.now(), sizeOnGone: posSize });
             continue;
           }
@@ -979,7 +990,6 @@ export async function runCommand(
           // Ордер уже был помечен как исчезнувший - проверяем что произошло
           const elapsed = Date.now() - rec.ts;
           const sizeOnGone = rec.sizeOnGone;
-          const increasedSinceGone = posSize > sizeOnGone + 1e-9;
           const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const flat = posSize < Math.max(minQty * 0.5, 1e-12);
 
@@ -989,24 +999,22 @@ export async function runCommand(
           }
 
           // Прошло достаточно времени - определяем что произошло
-          if (increasedSinceGone) {
-            // ✅ Позиция увеличилась - ордер ИСПОЛНИЛСЯ
+          if (posSize > sizeOnGone + 1e-9) {
+            // ✅ Позиция УВЕЛИЧИЛАСЬ - ордер ИСПОЛНИЛСЯ
             keep.delete(id);
             gone.delete(id);
+            if (mode === "console") {
+              console.log(`[DEBUG] Order ${id} filled: posSize increased from ${sizeOnGone} to ${posSize}`);
+            }
             continue;
           }
 
-          if (flat && sizeOnGone < minQty * 0.5) {
-            // ✅ Позиция была пустая и осталась пустой - ордер СНЯТ ВРУЧНУЮ
-            keep.delete(id);
-            gone.delete(id);
-            continue;
-          }
-
-          // Позиция есть, но не увеличилась - возможно частичное исполнение или другая ситуация
-          // Удаляем из keep, но не считаем снятым вручную
+          // ✅ Позиция НЕ увеличилась - ордер СНЯТ ВРУЧНУЮ
           keep.delete(id);
           gone.delete(id);
+          if (mode === "console") {
+            console.log(`[DEBUG] Order ${id} cancelled manually: posSize=${posSize}, sizeOnGone=${sizeOnGone}, flat=${flat}`);
+          }
         }
 
         // ✅ ПРОВЕРКА 1: Ручное закрытие позиции (позиция была, теперь её нет)
@@ -1037,7 +1045,7 @@ export async function runCommand(
 
           // ✅ ПРОВЕРКА 2: Все входные ордера сняты вручную (позиции не было и нет)
         {
-          // Проверяем что все ордера исчезли (по ID и clientOrderId)
+          // ✅ УПРОЩЁННАЯ ПРОВЕРКА: если ордера исчезли, позиции нет, прошло время → сняты вручную
           const allOrdersGone = entryIds.length > 0 && entryIds.every(id => {
             const idStr = String(id);
             const foundById = allOpenOrderIds.has(idStr);
@@ -1047,23 +1055,20 @@ export async function runCommand(
             return !foundById && !foundByClientId;
           });
           
-          const timeSinceFirstSeen = ordersEverSeen ? Date.now() - firstSeenAt : Infinity;
           const timeSinceCreated = Date.now() - TASK_CREATED_AT;
           
-          // ✅ УПРОЩЁННАЯ ПРОВЕРКА: если ордера были видны, исчезли, прошло время, позиции нет - значит сняты вручную
-          // Условия:
+          // Простая проверка:
           // 1. Позиция пустая (flat)
-          // 2. Все ордера удалены из keep (keep.size === 0) - обработаны в цикле выше
-          // 3. Ордера были видны хотя бы раз (ordersEverSeen)
-          // 4. Все ордера исчезли из списка открытых (allOrdersGone)
-          // 5. Прошло достаточно времени (минимум 3 сек после первого обнаружения ИЛИ 15 сек после создания)
-          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && ordersEverSeen && 
-            allOrdersGone && (timeSinceFirstSeen >= 3000 || (timeSinceCreated >= 15000 && !ordersEverSeen));
+          // 2. Все ордера удалены из keep (keep.size === 0)
+          // 3. Все ордера исчезли из списка открытых (allOrdersGone)
+          // 4. Прошло минимум 5 секунд после создания задачи
+          const canRemove = flat && keep.size === 0 && entryIds.length > 0 && 
+            allOrdersGone && timeSinceCreated >= 5000;
           
           if (canRemove) {
             // Логируем для отладки
             if (mode === "console") {
-              console.log(`[DEBUG] Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, timeSinceFirstSeen=${timeSinceFirstSeen}ms, allOrdersGone=${allOrdersGone}`);
+              console.log(`[DEBUG] Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, timeSinceCreated=${timeSinceCreated}ms, allOrdersGone=${allOrdersGone}, keep.size=${keep.size}`);
             }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
@@ -1094,40 +1099,14 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
-        // ✅ КРИТИЧНО: Определяем срабатывание отложки
-        // Отложка сработала если:
-        // 1. Позиция появилась/увеличилась (increased или lastSize === 0 && posSize > 0)
-        // 2. ИЛИ хотя бы один входной ордер исчез из списка открытых И позиция есть
-        const entryOrderFilled = entriesLeft < entryIds.length; // Хотя бы один ордер исчез
-        const positionAppeared = lastSize === 0 && posSize > 0;
-        const positionIncreased = increased && lastSize > 0;
+        // ✅ УПРОЩЁННАЯ ЛОГИКА: Выставляем TP/SL если позиция есть и они не выставлены
+        // Простая проверка: если позиция > 0 и entryAvg > 0 (позиция реальная) → выставляем TP/SL
+        // Не зависим от lastSize, increased и других сложных условий
+        const shouldPlaceTP_SL = posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent);
         
-        // ✅ КРИТИЧНО: Проверяем явно - есть ли позиция, но входные ордера исчезли
-        // Это означает что отложка сработала между циклами проверки
-        const stopOrderFilledBetweenCycles = posSize > 0 && entryOrderFilled && lastSize === 0;
-        
-        // ✅ КРИТИЧНО: Если позиция есть, но мы ещё не выставили TP/SL - это признак что отложка сработала
-        // Проверяем: позиция > 0, entryAvg > 0 (позиция реальная), но TP/SL не выставлены
-        const positionExistsButNoTP_SL = posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent);
-        
-        // ✅ ИСПРАВЛЕНО: Выставляем TP/SL когда:
-        // 1. Позиция появилась впервые (positionAppeared) - отложка сработала
-        // 2. Позиция увеличилась (positionIncreased) - обычный случай
-        // 3. Входной ордер исчез и позиция есть (entryOrderFilled && posSize > 0) - отложка сработала
-        // 4. Отложка сработала между циклами (stopOrderFilledBetweenCycles) - явная проверка
-        // 5. Позиция есть, но TP/SL ещё не выставлены (positionExistsButNoTP_SL) - защита от пропуска
-        const shouldPlaceTP_SL = posSize > 0 && entryAvg > 0 && (
-          positionAppeared || 
-          positionIncreased || 
-          (entryOrderFilled && posSize > 0) ||
-          stopOrderFilledBetweenCycles ||
-          positionExistsButNoTP_SL
-        );
-        
-        // ✅ ЛОГИРОВАНИЕ для отладки (только если позиция есть, но TP/SL не выставлены)
-        if (posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent) && mode === "console") {
-          console.log(`[DEBUG] Position exists but TP/SL not placed: posSize=${posSize}, entryAvg=${entryAvg}, lastSize=${lastSize}, entriesLeft=${entriesLeft}, tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}`);
-          console.log(`[DEBUG] Conditions check: positionAppeared=${positionAppeared}, positionIncreased=${positionIncreased}, entryOrderFilled=${entryOrderFilled}, stopOrderFilledBetweenCycles=${stopOrderFilledBetweenCycles}, positionExistsButNoTP_SL=${positionExistsButNoTP_SL}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
+        // ✅ ЛОГИРОВАНИЕ для отладки
+        if (posSize > 0 && entryAvg > 0 && mode === "console") {
+          console.log(`[DEBUG] Position check: posSize=${posSize}, entryAvg=${entryAvg}, lastSize=${lastSize}, entriesLeft=${entriesLeft}, tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
         }
 
         if (shouldPlaceTP_SL) {
