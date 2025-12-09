@@ -1048,12 +1048,23 @@ export async function runCommand(
           });
           
           const timeSinceFirstSeen = ordersEverSeen ? Date.now() - firstSeenAt : Infinity;
+          const timeSinceCreated = Date.now() - TASK_CREATED_AT;
           
-          // Упрощённая проверка: если ордера были видны, исчезли, прошло время, позиции нет - значит сняты вручную
+          // ✅ УПРОЩЁННАЯ ПРОВЕРКА: если ордера были видны, исчезли, прошло время, позиции нет - значит сняты вручную
+          // Условия:
+          // 1. Позиция пустая (flat)
+          // 2. Все ордера удалены из keep (keep.size === 0) - обработаны в цикле выше
+          // 3. Ордера были видны хотя бы раз (ordersEverSeen)
+          // 4. Все ордера исчезли из списка открытых (allOrdersGone)
+          // 5. Прошло достаточно времени (минимум 3 сек после первого обнаружения ИЛИ 15 сек после создания)
           const canRemove = flat && keep.size === 0 && entryIds.length > 0 && ordersEverSeen && 
-            allOrdersGone && timeSinceFirstSeen >= 3000; // Минимум 3 секунды после первого обнаружения
+            allOrdersGone && (timeSinceFirstSeen >= 3000 || (timeSinceCreated >= 15000 && !ordersEverSeen));
           
           if (canRemove) {
+            // Логируем для отладки
+            if (mode === "console") {
+              console.log(`[DEBUG] Manual cancellation detected: taskId=${task.id}, symbol=${symbolCcxt}, timeSinceFirstSeen=${timeSinceFirstSeen}ms, allOrdersGone=${allOrdersGone}`);
+            }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
             const otherHasActiveEntries = otherTasks.some(t => 
@@ -1086,23 +1097,38 @@ export async function runCommand(
         // ✅ КРИТИЧНО: Определяем срабатывание отложки
         // Отложка сработала если:
         // 1. Позиция появилась/увеличилась (increased или lastSize === 0 && posSize > 0)
-        // 2. И хотя бы один входной ордер исчез из списка открытых
+        // 2. ИЛИ хотя бы один входной ордер исчез из списка открытых И позиция есть
         const entryOrderFilled = entriesLeft < entryIds.length; // Хотя бы один ордер исчез
         const positionAppeared = lastSize === 0 && posSize > 0;
         const positionIncreased = increased && lastSize > 0;
         
+        // ✅ КРИТИЧНО: Проверяем явно - есть ли позиция, но входные ордера исчезли
+        // Это означает что отложка сработала между циклами проверки
+        const stopOrderFilledBetweenCycles = posSize > 0 && entryOrderFilled && lastSize === 0;
+        
+        // ✅ КРИТИЧНО: Если позиция есть, но мы ещё не выставили TP/SL - это признак что отложка сработала
+        // Проверяем: позиция > 0, entryAvg > 0 (позиция реальная), но TP/SL не выставлены
+        const positionExistsButNoTP_SL = posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent);
+        
         // ✅ ИСПРАВЛЕНО: Выставляем TP/SL когда:
         // 1. Позиция появилась впервые (positionAppeared) - отложка сработала
         // 2. Позиция увеличилась (positionIncreased) - обычный случай
-        // 3. Входной ордер исчез и позиция есть (entryOrderFilled && posSize > 0) - отложка сработала между циклами
-        // 4. Позиция есть, но TP/SL ещё не выставлены - защита от пропуска
-        const shouldPlaceTP_SL = posSize > 0 && (
+        // 3. Входной ордер исчез и позиция есть (entryOrderFilled && posSize > 0) - отложка сработала
+        // 4. Отложка сработала между циклами (stopOrderFilledBetweenCycles) - явная проверка
+        // 5. Позиция есть, но TP/SL ещё не выставлены (positionExistsButNoTP_SL) - защита от пропуска
+        const shouldPlaceTP_SL = posSize > 0 && entryAvg > 0 && (
           positionAppeared || 
           positionIncreased || 
           (entryOrderFilled && posSize > 0) ||
-          (!tpsPlaced && entriesLeft === 0) ||
-          (!slPxCurrent && posSize > 0)
+          stopOrderFilledBetweenCycles ||
+          positionExistsButNoTP_SL
         );
+        
+        // ✅ ЛОГИРОВАНИЕ для отладки (только если позиция есть, но TP/SL не выставлены)
+        if (posSize > 0 && entryAvg > 0 && (!tpsPlaced || !slPxCurrent) && mode === "console") {
+          console.log(`[DEBUG] Position exists but TP/SL not placed: posSize=${posSize}, entryAvg=${entryAvg}, lastSize=${lastSize}, entriesLeft=${entriesLeft}, tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}`);
+          console.log(`[DEBUG] Conditions check: positionAppeared=${positionAppeared}, positionIncreased=${positionIncreased}, entryOrderFilled=${entryOrderFilled}, stopOrderFilledBetweenCycles=${stopOrderFilledBetweenCycles}, positionExistsButNoTP_SL=${positionExistsButNoTP_SL}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
+        }
 
         if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
