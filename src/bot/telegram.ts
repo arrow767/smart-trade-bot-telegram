@@ -40,7 +40,102 @@ if (proxyUrl) {
   }
 }
 
-const bot = agent ? new Telegraf(token, { telegram: { agent } }) : new Telegraf(token);
+// ✅ НОВОЕ: Настройки таймаутов и retry для Telegram
+const TELEGRAM_TIMEOUT = Number(process.env.TELEGRAM_TIMEOUT_MS || 30_000); // 30 секунд по умолчанию
+const TELEGRAM_RETRY_TRIES = Number(process.env.TELEGRAM_RETRY_TRIES || 3);
+const TELEGRAM_RETRY_DELAY = Number(process.env.TELEGRAM_RETRY_DELAY_MS || 1000);
+
+const bot = agent 
+  ? new Telegraf(token, { 
+      telegram: { 
+        agent,
+        apiRoot: process.env.TELEGRAM_API_ROOT || undefined,
+        webhookReply: false, // отключаем webhook reply для стабильности
+      } 
+    }) 
+  : new Telegraf(token, {
+      telegram: {
+        apiRoot: process.env.TELEGRAM_API_ROOT || undefined,
+        webhookReply: false,
+      }
+    });
+
+// ✅ НОВОЕ: Утилита для безопасной отправки сообщений с retry
+async function safeReply(
+  ctx: any,
+  text: string,
+  options?: any,
+  retries = TELEGRAM_RETRY_TRIES
+): Promise<any> {
+  let lastError: any;
+  
+  for (let i = 0; i < retries; i++) {
+    try {
+      // Увеличиваем таймаут для каждого запроса
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("Telegram API timeout")), TELEGRAM_TIMEOUT);
+      });
+      
+      const replyPromise = ctx.reply(text, options);
+      return await Promise.race([replyPromise, timeoutPromise]);
+    } catch (e: any) {
+      lastError = e;
+      
+      // Проверяем, стоит ли ретраить
+      const isRetryable = 
+        e?.code === "ETIMEDOUT" ||
+        e?.errno === "ETIMEDOUT" ||
+        e?.type === "system" ||
+        /timeout|timed out|network|ECONNRESET|ENOTFOUND/i.test(e?.message || "");
+      
+      if (!isRetryable || i === retries - 1) {
+        throw e;
+      }
+      
+      // Экспоненциальный backoff
+      const delay = TELEGRAM_RETRY_DELAY * Math.pow(2, i);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+  
+  throw lastError;
+}
+
+// ✅ НОВОЕ: Утилита для безопасного answerCbQuery
+async function safeAnswerCbQuery(
+  ctx: any,
+  text?: string,
+  retries = TELEGRAM_RETRY_TRIES
+): Promise<any> {
+  let lastError: any;
+  
+  for (let i = 0; i < retries; i++) {
+    try {
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("Telegram API timeout")), 5000); // короткий таймаут для callback
+      });
+      
+      const answerPromise = ctx.answerCbQuery(text);
+      return await Promise.race([answerPromise, timeoutPromise]);
+    } catch (e: any) {
+      lastError = e;
+      
+      const isRetryable = 
+        e?.code === "ETIMEDOUT" ||
+        e?.errno === "ETIMEDOUT" ||
+        /timeout|timed out|network/i.test(e?.message || "");
+      
+      if (!isRetryable || i === retries - 1) {
+        // Для answerCbQuery не критично, просто логируем
+        console.warn("Failed to answerCbQuery:", e?.message || e);
+        return;
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 500 * (i + 1)));
+    }
+  }
+}
+
 const ex = new BinanceFutures();
 const book = new TaskBook();
 
@@ -106,7 +201,7 @@ bot.start(async (ctx) => {
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     await ex.loadMarkets().catch(()=>{});
-    await ctx.reply(
+    await safeReply(ctx,
       banner("telegram",
         `Готов. Формат: l|s <symbol> <position_usd> <entry> [preset=${DEFAULT_PRESET}]`,
         `Пример: l xrp 500 2.45 4h`),
@@ -114,7 +209,9 @@ bot.start(async (ctx) => {
     );
   } catch (e:any) {
     console.error("start handler error:", e);
-    await ctx.reply(`Ошибка запуска: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    try {
+      await safeReply(ctx, `Ошибка запуска: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    } catch {}
   }
 });
 
@@ -123,9 +220,9 @@ bot.start(async (ctx) => {
 bot.action("HELP", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
-    await ctx.reply(help, { parse_mode: "HTML", ...mainKb });
+    await safeReply(ctx, help, { parse_mode: "HTML", ...mainKb });
   } catch (e:any) {
     console.error("HELP action error:", e);
   }
@@ -136,44 +233,48 @@ bot.action("HELP", async (ctx)=>{
 bot.action("POS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     // Позиции + кнопки «закрыть процент» (оставляем как было)
     const list = await ex.fetchAllOpenPositions();
-    if (!list.length) return ctx.reply(`<b>Открытых позиций нет.</b>`, { parse_mode:"HTML" });
+    if (!list.length) return safeReply(ctx, `<b>Открытых позиций нет.</b>`, { parse_mode:"HTML" });
     for (const p of list) {
       const sym = p.symbol.replace("/USDT:USDT","").toLowerCase();
       const kb = Markup.inlineKeyboard([
         [ Markup.button.callback("Close 25%", `CLOSE|${sym}|25`), Markup.button.callback("Close 50%", `CLOSE|${sym}|50`), Markup.button.callback("Close 100%", `CLOSE|${sym}|100`) ]
       ]);
-      await ctx.reply(
+      await safeReply(ctx,
         `<b>${p.symbol}</b>\nside: ${p.side.toUpperCase()}  qty=${p.contracts}  avg=${p.entryPrice}\nPnL: ${(Number(p.unrealizedPnlUsd)||0).toFixed(2)}$`,
         { parse_mode:"HTML", ...kb }
       );
     }
   } catch (e:any) {
     console.error("POS action error:", e);
-    await ctx.reply(`Ошибка позиций: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    try {
+      await safeReply(ctx, `Ошибка позиций: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    } catch {}
   }
 });
 
 bot.action(/CLOSE\|([a-zA-Z0-9]+)\|([0-9]{1,3})/, async (ctx) => {
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
+    await safeAnswerCbQuery(ctx);
     const symbol = ctx.match![1];
     const pct = Math.max(1, Math.min(100, Number(ctx.match![2])));
-    await runCommand(ex, book, { kind:"close", symbol, percent: pct }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, { kind:"close", symbol, percent: pct }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("CLOSE action error:", e);
-    await ctx.reply(`Ошибка закрытия: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    try {
+      await safeReply(ctx, `Ошибка закрытия: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    } catch {}
   }
 });
 
 bot.action("DEP", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
-    await runCommand(ex, book, {kind:"deposit"}, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await safeAnswerCbQuery(ctx);
+    await runCommand(ex, book, {kind:"deposit"}, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("DEP action error:", e);
   }
@@ -182,11 +283,11 @@ bot.action("DEP", async (ctx)=>{
 bot.action("ORDERS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery();
-    await runCommand(ex, book, { kind:"orders" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await safeAnswerCbQuery(ctx);
+    await runCommand(ex, book, { kind:"orders" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("ORDERS action error:", e);
-    try { await ctx.reply(`Ошибка orders: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" }); } catch {}
+    try { await safeReply(ctx, `Ошибка orders: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" }); } catch {}
   }
 });
 
@@ -194,7 +295,7 @@ bot.action("ORDERS", async (ctx)=>{
 bot.hears("📜 Orders", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await runCommand(ex, book, { kind:"orders" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, { kind:"orders" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Orders error:", e);
   }
@@ -203,7 +304,7 @@ bot.hears("📜 Orders", async (ctx)=>{
 bot.hears("📊 Positions", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await runCommand(ex, book, { kind:"positions" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, { kind:"positions" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Positions error:", e);
   }
@@ -212,7 +313,7 @@ bot.hears("📊 Positions", async (ctx)=>{
 bot.hears("💰 Deposit", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await runCommand(ex, book, {kind:"deposit"}, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, {kind:"deposit"}, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Deposit error:", e);
   }
@@ -221,7 +322,7 @@ bot.hears("💰 Deposit", async (ctx)=>{
 bot.hears("🧰 Tasks", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await runCommand(ex, book, { kind:"tasks" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, { kind:"tasks" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("hears Tasks error:", e);
   }
@@ -231,7 +332,7 @@ bot.hears("❓ Help", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
-    await ctx.reply(help, { parse_mode:"HTML" });
+    await safeReply(ctx, help, { parse_mode:"HTML" });
   } catch (e:any) {
     console.error("hears Help error:", e);
   }
@@ -264,9 +365,9 @@ bot.action("TASKS", async (ctx)=>{
 bot.action(/CANCEL\|([0-9]+)/, async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery(`Cancel #${ctx.match![1]}`);
+    await safeAnswerCbQuery(ctx, `Cancel #${ctx.match![1]}`);
     const id = Number(ctx.match![1]);
-    await runCommand(ex, book, { kind:"cancel", id }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await runCommand(ex, book, { kind:"cancel", id }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("CANCEL action error:", e);
   }
@@ -275,8 +376,8 @@ bot.action(/CANCEL\|([0-9]+)/, async (ctx)=>{
 bot.action("CANCEL_ALL", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery("Cancel all");
-    await runCommand(ex, book, { kind:"cancel_all" }, (m)=>ctx.reply(m,{parse_mode:"HTML"}), (m)=>ctx.reply(m,{parse_mode:"HTML"}), "telegram");
+    await safeAnswerCbQuery(ctx, "Cancel all");
+    await runCommand(ex, book, { kind:"cancel_all" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
   } catch (e:any) {
     console.error("CANCEL_ALL action error:", e);
   }
@@ -534,13 +635,13 @@ bot.action("NOOP", async (ctx)=>{
 bot.action(/TRADE_CONFIRM\|(.+)/, async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery("✅ Выполняю команду...");
+    await safeAnswerCbQuery(ctx, "✅ Выполняю команду...");
     
     const tradeId = ctx.match![1];
     const pending = pendingTrades.get(tradeId);
     
     if (!pending) {
-      await ctx.reply("⚠️ Команда устарела или уже выполнена.", { parse_mode: "HTML" });
+      await safeReply(ctx, "⚠️ Команда устарела или уже выполнена.", { parse_mode: "HTML" });
       return;
     }
     
@@ -553,10 +654,12 @@ bot.action(/TRADE_CONFIRM\|(.+)/, async (ctx)=>{
     } catch {}
     
     // Выполняем команду
-    await runCommand(ex, book, pending.parsed, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
+    await runCommand(ex, book, pending.parsed, (m)=>safeReply(ctx, m, { parse_mode:"HTML" }), (m)=>safeReply(ctx, m, { parse_mode:"HTML" }), "telegram");
   } catch (e:any) {
     console.error("TRADE_CONFIRM error:", e);
-    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    try {
+      await safeReply(ctx, `Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+    } catch {}
   }
 });
 
@@ -564,13 +667,13 @@ bot.action(/TRADE_CONFIRM\|(.+)/, async (ctx)=>{
 bot.action(/TRADE_CANCEL\|(.+)/, async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery("❌ Отменено");
+    await safeAnswerCbQuery(ctx, "❌ Отменено");
     
     const tradeId = ctx.match![1];
     const pending = pendingTrades.get(tradeId);
     
     if (!pending) {
-      await ctx.reply("⚠️ Команда уже не активна.", { parse_mode: "HTML" });
+      await safeReply(ctx, "⚠️ Команда уже не активна.", { parse_mode: "HTML" });
       return;
     }
     
@@ -580,7 +683,7 @@ bot.action(/TRADE_CANCEL\|(.+)/, async (ctx)=>{
     // Удаляем кнопки и добавляем метку отмены
     try {
       await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-      await ctx.reply("❌ <b>Команда отменена</b>", { parse_mode: "HTML" });
+      await safeReply(ctx, "❌ <b>Команда отменена</b>", { parse_mode: "HTML" });
     } catch {}
   } catch (e:any) {
     console.error("TRADE_CANCEL error:", e);
@@ -590,7 +693,7 @@ bot.action(/TRADE_CANCEL\|(.+)/, async (ctx)=>{
 // DEPRECATED: старый обработчик (оставлен для совместимости)
 bot.action("TRADE_OK", async (ctx)=>{
   try {
-    await ctx.answerCbQuery("✅");
+    await safeAnswerCbQuery(ctx, "✅");
   } catch {}
 });
 
@@ -744,18 +847,18 @@ bot.on("text", async (ctx)=>{
       const cmd = map[text];
       if (cmd?.kind==="help") {
         const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
-        return ctx.reply(help, { parse_mode:"HTML", ...mainKb });
+        return safeReply(ctx, help, { parse_mode:"HTML", ...mainKb });
       }
-      if (cmd) return runCommand(ex, book, cmd, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
+      if (cmd) return runCommand(ex, book, cmd, (m)=>safeReply(ctx, m, { parse_mode:"HTML" }), (m)=>safeReply(ctx, m, { parse_mode:"HTML" }), "telegram");
     }
 
     const parsed = parseLine(text);
-    if (!parsed) return ctx.reply(`Неверный формат. Пример:\n<code>l xrp 500 2.45 4h</code>`, { parse_mode:"HTML" });
+    if (!parsed) return safeReply(ctx, `Неверный формат. Пример:\n<code>l xrp 500 2.45 4h</code>`, { parse_mode:"HTML" });
 
     // команда exit удалена
     if (parsed.kind==="help")  {
       const help = `<pre>${escapeHtml(buildHelpText())}</pre>`;
-      return ctx.reply(help, { parse_mode:"HTML", ...mainKb });
+      return safeReply(ctx, help, { parse_mode:"HTML", ...mainKb });
     }
 
     // ✅ НОВОЕ: Отправка уведомления о сделке перед выполнением
@@ -811,7 +914,7 @@ bot.on("text", async (ctx)=>{
           ]
         ]);
         
-        const msg = await ctx.reply(notification, { parse_mode: "HTML", ...confirmButtons });
+        const msg = await safeReply(ctx, notification, { parse_mode: "HTML", ...confirmButtons });
         
         // Сохраняем команду для последующего выполнения
         pendingTrades.set(tradeId, {
@@ -833,11 +936,18 @@ bot.on("text", async (ctx)=>{
       }
     }
 
-    await runCommand(ex, book, parsed, (m)=>ctx.reply(m, { parse_mode:"HTML" }), (m)=>ctx.reply(m, { parse_mode:"HTML" }), "telegram");
+    await runCommand(
+      ex, 
+      book, 
+      parsed, 
+      (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
+      (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
+      "telegram"
+    );
   } catch (e:any) {
     console.error("text handler error:", e);
     try {
-      await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
+      await safeReply(ctx, `Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
     } catch {}
   }
 });
@@ -856,7 +966,9 @@ bot.command("whoami", async (ctx)=>{
 bot.catch(async (err, ctx) => {
   console.error("Unhandled bot error:", err);
   try {
-    await ctx.reply?.(`Неожиданная ошибка: <code>${escapeHtml((err as any)?.message||String(err))}</code>`, { parse_mode:"HTML" });
+    if (ctx && ctx.reply) {
+      await safeReply(ctx, `Неожиданная ошибка: <code>${escapeHtml((err as any)?.message||String(err))}</code>`, { parse_mode:"HTML" });
+    }
   } catch {}
 });
 
@@ -873,5 +985,24 @@ function escapeHtml(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-process.on("unhandledRejection", e => console.error("UNHANDLED:", e));
-process.on("uncaughtException", e => console.error("UNCAUGHT:", e));
+// ✅ НОВОЕ: Улучшенная обработка unhandled errors
+process.on("unhandledRejection", (e: any) => {
+  console.error("UNHANDLED REJECTION:", e);
+  // Игнорируем таймауты Telegram API - они обрабатываются через retry
+  if (e?.code === "ETIMEDOUT" || e?.errno === "ETIMEDOUT" || /telegram|fetch/i.test(e?.message || "")) {
+    console.warn("Telegram API timeout (will retry):", e?.message || e);
+    return;
+  }
+});
+
+process.on("uncaughtException", (e: any) => {
+  console.error("UNCAUGHT EXCEPTION:", e);
+  // Не завершаем процесс для некритичных ошибок
+  if (e?.code === "ETIMEDOUT" || e?.errno === "ETIMEDOUT") {
+    console.warn("Network timeout (non-critical):", e?.message || e);
+    return;
+  }
+  // Для критичных ошибок - завершаем процесс
+  console.error("Critical error, exiting...");
+  process.exit(1);
+});
