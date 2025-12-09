@@ -467,6 +467,7 @@ export class BinanceFutures {
   
   /**
    * Базовый метод для вызова Algo Order API
+   * ⚠️ Для POST параметры отправляются в body, для GET/DELETE в query string
    */
   private async algoOrderRequest(
     method: "POST" | "DELETE" | "GET",
@@ -486,16 +487,32 @@ export class BinanceFutures {
       recvWindow,
     };
     
-    // Создаём query string и подписываем
-    const queryString = Object.entries(allParams)
+    // Фильтруем undefined и null
+    const cleanParams = Object.entries(allParams)
       .filter(([_, v]) => v !== undefined && v !== null)
-      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+      .reduce((acc, [k, v]) => {
+        acc[k] = String(v);
+        return acc;
+      }, {} as Record<string, string>);
+    
+    // Создаём query string для подписи
+    const queryString = Object.entries(cleanParams)
+      .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
       .join("&");
     
     const signature = this.signQuery(queryString);
-    const signedQuery = `${queryString}&signature=${signature}`;
     
-    const url = `${this.ALGO_ORDER_BASE_URL}${endpoint}?${signedQuery}`;
+    let url: string;
+    let body: string | undefined;
+    
+    if (method === "POST") {
+      // Для POST: параметры в body, signature добавляется в body
+      url = `${this.ALGO_ORDER_BASE_URL}${endpoint}`;
+      body = `${queryString}&signature=${signature}`;
+    } else {
+      // Для GET/DELETE: параметры в query string
+      url = `${this.ALGO_ORDER_BASE_URL}${endpoint}?${queryString}&signature=${signature}`;
+    }
     
     const response = await fetch(url, {
       method,
@@ -503,6 +520,7 @@ export class BinanceFutures {
         "X-MBX-APIKEY": this.apiKey!,
         "Content-Type": "application/x-www-form-urlencoded",
       },
+      body: body,
     });
     
     const data = await response.json();
@@ -536,12 +554,15 @@ export class BinanceFutures {
   }): Promise<AlgoOrderResult> {
     const m: any = this.fapi.market(params.symbol);
     
+    // ⚠️ ВАЖНО: algoType должен быть "CONDITIONAL" для условных ордеров
     const apiParams: Record<string, any> = {
       symbol: m.id,
       side: params.side,
+      algoType: "CONDITIONAL", // ⚠️ ОБЯЗАТЕЛЬНЫЙ параметр с заглавной T
       type: params.type,
-      stopPrice: this.fapi.priceToPrecision(params.symbol, params.stopPrice),
+      triggerPrice: this.fapi.priceToPrecision(params.symbol, params.stopPrice), // используем triggerPrice вместо stopPrice
       workingType: params.workingType || "CONTRACT_PRICE",
+      timeInForce: "GTC",
     };
     
     if (params.quantity !== undefined) {
@@ -557,7 +578,9 @@ export class BinanceFutures {
       apiParams.reduceOnly = params.reduceOnly ? "true" : "false";
     }
     if (params.priceProtect !== undefined) {
-      apiParams.priceProtect = params.priceProtect ? "true" : "false";
+      apiParams.priceProtect = params.priceProtect ? "TRUE" : "FALSE"; // Binance ожидает строку "FALSE" или "TRUE"
+    } else {
+      apiParams.priceProtect = "FALSE";
     }
     if (params.newClientOrderId) {
       apiParams.newClientOrderId = params.newClientOrderId;
