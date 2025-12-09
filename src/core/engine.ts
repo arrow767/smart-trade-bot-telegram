@@ -868,6 +868,10 @@ export async function runCommand(
       const MANUAL_GONE_GRACE_MS = 4000;
       const gone = new Map<string, { ts: number; sizeOnGone: number }>();
       
+      // ✅ НОВОЕ: Защита от ложных срабатываний сразу после создания ордеров
+      const TASK_CREATED_AT = Date.now();
+      const MIN_TASK_AGE_MS = 10000; // Минимум 10 секунд должно пройти перед проверкой на "снято вручную"
+      
       // ✅ НОВОЕ: Периодическая очистка висячих tasks (каждые 30 сек)
       let lastCleanupTs = Date.now();
       const CLEANUP_INTERVAL_MS = 30_000;
@@ -902,12 +906,22 @@ export async function runCommand(
         const entriesLeft = open.filter((o: any) => o.id && keep.has(o.id)).length;
 
         // === Исправлено: надёжное определение «снято вручную» ===
+        // ⚠️ КРИТИЧНО: Не проверяем исчезновение ордеров сразу после создания задачи
+        const taskAge = Date.now() - TASK_CREATED_AT;
+        const canCheckGone = taskAge >= MIN_TASK_AGE_MS;
+        
         for (const id of [...keep]) {
           const exists = open.some((o: any) => o.id === id);
           if (exists) {
             gone.delete(id);
             continue;
           }
+          
+          // ⚠️ Защита: не начинаем отслеживать исчезновение ордеров сразу после создания
+          if (!canCheckGone) {
+            continue; // Пропускаем проверку, если задача только что создана
+          }
+          
           // не найден среди открытых
           const rec = gone.get(id);
           if (!rec) {
@@ -949,10 +963,17 @@ export async function runCommand(
 
         // ✅ НОВЫЙ чек: если мы вне позиции и ВСЕ входные отложки этой задачи сняты — удаляем задачу
         // НО: учитываем, что могут быть другие задачи на этот же символ!
+        // ⚠️ КРИТИЧНО: Не проверяем сразу после создания задачи (защита от race condition с API)
         {
+          const taskAge = Date.now() - TASK_CREATED_AT;
           const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const flat = posSize < Math.max(minQty * 0.5, 1e-12);
-          if (flat && keep.size === 0) {
+          
+          // Проверяем только если:
+          // 1. Прошло достаточно времени с момента создания задачи (защита от race condition)
+          // 2. Ордера действительно были созданы (entryIds не пустой)
+          // 3. Все ордера исчезли из keep (сняты или исполнились)
+          if (flat && keep.size === 0 && taskAge >= MIN_TASK_AGE_MS && entryIds.length > 0) {
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
             const otherHasActiveEntries = otherTasks.some(t => 
