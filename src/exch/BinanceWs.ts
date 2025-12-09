@@ -185,9 +185,12 @@ export class BinanceWs {
           this.keepAliveInterval = null;
         }
 
-        // Переподключаемся если не было явного закрытия
+        // Переподключаемся если не было явного закрытия (1000 = нормальное закрытие)
         if (code !== 1000) {
+          console.log(`[WS] Unexpected close (code=${code}), scheduling reconnect...`);
           this.scheduleReconnect();
+        } else {
+          console.log(`[WS] Normal close (code=1000), not reconnecting`);
         }
       });
     } catch (error: any) {
@@ -202,10 +205,13 @@ export class BinanceWs {
    * Обработка сообщений от WebSocket
    */
   private handleMessage(message: any) {
+    // Логируем все сообщения для отладки
+    console.log(`[WS] Received message:`, JSON.stringify(message, null, 2));
+    
     // ORDER_TRADE_UPDATE - обновления ордеров
     if (message.e === "ORDER_TRADE_UPDATE") {
       const orderData = message.o;
-      console.log(`[WS] ORDER_TRADE_UPDATE:`, {
+      console.log(`[WS] 🔔 ORDER_TRADE_UPDATE:`, {
         symbol: orderData.s,
         orderId: orderData.i,
         clientOrderId: orderData.c,
@@ -222,12 +228,17 @@ export class BinanceWs {
 
     // ACCOUNT_UPDATE - обновления аккаунта (позиции, баланс)
     if (message.e === "ACCOUNT_UPDATE") {
-      console.log(`[WS] ACCOUNT_UPDATE:`, {
+      console.log(`[WS] 🔔 ACCOUNT_UPDATE:`, {
         eventTime: new Date(message.E).toISOString(),
         positions: message.a?.P?.length || 0,
         balances: message.a?.B?.length || 0,
       });
       this.onAccountUpdate?.(message.a);
+    }
+    
+    // Если это не известное событие - просто логируем
+    if (message.e && message.e !== "ORDER_TRADE_UPDATE" && message.e !== "ACCOUNT_UPDATE") {
+      console.log(`[WS] ⚠️ Unknown event type: ${message.e}`);
     }
   }
 
