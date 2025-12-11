@@ -713,11 +713,11 @@ export async function runCommand(
   const preset = await getPreset(presetName);
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   
-  // ✅ ИСПРАВЛЕНО: используем marketSafe() с автоматической перезагрузкой
+  // ✅ Пытаемся загрузить market (с автоперезагрузкой если не найден), но не прерываем работу
   try {
     await ex.marketSafe(symbolCcxt);
-  } catch (err: any) {
-    throw new Error(`Символ ${symbolCcxt} не найден на бирже. Возможно, он был делистнут или ещё не доступен.`);
+  } catch {
+    // Игнорируем ошибку - fetchTicker ниже сам проверит доступность символа
   }
 
   const t0 = await ex.fetchTicker(symbolCcxt);
