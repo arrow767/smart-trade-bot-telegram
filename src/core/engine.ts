@@ -1105,11 +1105,24 @@ export async function runCommand(
             const sideExit2 = side === "long" ? "sell" : "buy";
             
             // ✅ ИСПРАВЛЕНО: Выставляем SL всегда, если его ещё нет или он изменился
+            // ⚠️ КРИТИЧНО: slPxCurrent устанавливается ТОЛЬКО при успешном выставлении
             if (!slPxCurrent || Math.abs(slPxCurrent - safeSL) > 1e-9) {
-              await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL).catch((e) => {
-                console.warn(`Failed to place SL: ${e?.message || e}`);
-              });
-              slPxCurrent = safeSL;
+              try {
+                await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
+                slPxCurrent = safeSL;
+                info(mode === "console" 
+                  ? `✅ SL выставлен: ${safeSL}`
+                  : `<b>✅ SL выставлен:</b> ${safeSL}`
+                );
+              } catch (e: any) {
+                console.error(`Failed to place SL: ${e?.message || e}`);
+                const errMsg = String(e?.message || e || "Unknown error");
+                info(mode === "console" 
+                  ? `⚠️ Ошибка выставления SL: ${errMsg}`
+                  : `<b>⚠️ Ошибка выставления SL:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                );
+                // НЕ устанавливаем slPxCurrent — следующая итерация попытается снова
+              }
             }
 
             // ✅ УПРОЩЕНО: Выставляем TP если они ещё не выставлены
