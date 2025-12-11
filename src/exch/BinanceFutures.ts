@@ -254,10 +254,19 @@ export class BinanceFutures {
       return this.fapi.market(symbol);
     } catch (err: any) {
       // Если символ не найден — пробуем перезагрузить markets
-      if (err?.message?.includes('does not have market symbol')) {
-        console.log(`⚠️ Символ ${symbol} не найден в кэше, перезагружаю markets...`);
+      const errMsg = String(err?.message || "");
+      if (errMsg.includes('does not have market symbol') || 
+          errMsg.includes('market not loaded') ||
+          errMsg.includes('is not defined')) {
+        console.log(`⚠️ Символ ${symbol} не найден в кэше (${errMsg}), перезагружаю markets...`);
         await this.loadMarkets(true); // reload=true
-        return this.fapi.market(symbol);
+        // После перезагрузки пробуем ещё раз
+        try {
+          return this.fapi.market(symbol);
+        } catch (err2: any) {
+          console.error(`❌ Символ ${symbol} не найден даже после перезагрузки markets: ${err2?.message || err2}`);
+          throw err2;
+        }
       }
       throw err;
     }
