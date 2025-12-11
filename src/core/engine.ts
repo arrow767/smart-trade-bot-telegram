@@ -139,9 +139,36 @@ export async function runCommand(
       closePosition?: boolean; datetime?: string; status?: string;
     }> = [];
     
+    // Хелпер для парсинга Algo Order в общий формат
+    const parseAlgoOrder = (ao: any, sym?: string) => {
+      let datetime = "";
+      try {
+        const timestamp = Number(ao.bookTime || ao.updateTime || ao.time || 0);
+        if (timestamp > 0) {
+          datetime = new Date(timestamp).toISOString().slice(0,19).replace("T"," ");
+        }
+      } catch {}
+      
+      const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
+      return {
+        id: String(ao.algoId || ao.clientAlgoId || ao.orderId || ""),
+        symbol: sym || String(ao.symbol || ""),
+        kind: orderType.includes("STOP") ? "STOP" as const : (orderType.includes("LIMIT") ? "LIMIT" as const : "MARKET" as const),
+        side: (String(ao.side || "buy").toLowerCase() === "buy" ? "buy" : "sell") as "buy" | "sell",
+        qty: Number(ao.quantity || ao.origQty || 0) || 0,
+        price: Number(ao.price || 0) || undefined,
+        stopPrice: Number(ao.triggerPrice || ao.stopPrice || 0) || undefined,
+        reduceOnly: (ao.reduceOnly === true || ao.reduceOnly === "true"),
+        closePosition: (ao.closePosition === true || ao.closePosition === "true"),
+        datetime,
+        status: String(ao.algoStatus || ao.status || ""),
+      };
+    };
+    
     try {
       // Если указан символ - запрашиваем только его ордера
       if (parsed.symbol) {
+        // Обычные ордера
         const open = (await ex.fetchOpenOrders(parsed.symbol)) as any[];
         for (const o of open) {
           rows.push({
@@ -158,6 +185,14 @@ export async function runCommand(
             status: String(o.status || o.info?.status || ""),
           });
         }
+        
+        // ✅ НОВОЕ: Algo Orders (STOP_MARKET, TAKE_PROFIT_MARKET и т.д.)
+        try {
+          const algoOrders = await ex.fetchOpenAlgoOrders(parsed.symbol);
+          for (const ao of algoOrders) {
+            rows.push(parseAlgoOrder(ao, parsed.symbol));
+          }
+        } catch {}
       } else {
         // Запрашиваем ВСЕ ордера со всех символов
         const allOrders = await ex.fetchAllOpenOrdersAcrossSymbols();
@@ -185,6 +220,14 @@ export async function runCommand(
             status: String(o.status || ""),
           });
         }
+        
+        // ✅ НОВОЕ: Algo Orders для всех символов
+        try {
+          const algoOrders = await ex.fetchOpenAlgoOrders(); // без символа = все
+          for (const ao of algoOrders) {
+            rows.push(parseAlgoOrder(ao));
+          }
+        } catch {}
       }
     } catch (e: any) {
       console.error("Orders fetch error details:", e);
@@ -205,6 +248,8 @@ export async function runCommand(
     const id = parsed.id;
     const symbols = await collectSymbolsForOrders(ex, book);
     let ok = false;
+    
+    // Сначала пробуем отменить как обычный ордер
     for (const sym of symbols) {
       try {
         await ex.cancelOrder(sym, id);
@@ -213,6 +258,19 @@ export async function runCommand(
         break;
       } catch {}
     }
+    
+    // ✅ НОВОЕ: Если не нашли обычный ордер - пробуем отменить как Algo Order
+    if (!ok) {
+      for (const sym of symbols) {
+        try {
+          await ex.cancelAlgoOrder(sym, id);
+          ok = true;
+          info(mode === "console" ? `Снял Algo ордер ${id} (${sym}).` : `<b>Снял Algo ордер</b> <code>${id}</code> для <code>${sym}</code>.`);
+          break;
+        } catch {}
+      }
+    }
+    
     if (!ok) {
       info(mode === "console" ? `Ордер ${id} не найден (или уже снят).` : `<b>Ордер не найден</b>: <code>${id}</code>.`);
     }
@@ -222,14 +280,37 @@ export async function runCommand(
   // --- отмена лимитных/стоп по символу ---
   if (parsed.kind === "cancel_limit_symbol" || parsed.kind === "cancel_stop_symbol") {
     const sym = parsed.symbol;
+    let total = 0;
     try {
+      // Обычные ордера
       const open = (await ex.fetchOpenOrders(sym)) as any[];
       const toCancel = open.filter((o: any) => parsed.kind === "cancel_limit_symbol" ? isLimitOrder(o) : isStopOrder(o));
-      for (const o of toCancel) { try { await ex.cancelOrder(sym, String(o.id)); } catch {} }
+      for (const o of toCancel) { 
+        try { await ex.cancelOrder(sym, String(o.id)); total++; } catch {} 
+      }
+      
+      // ✅ НОВОЕ: Algo Orders (STOP_MARKET, TAKE_PROFIT_MARKET)
+      try {
+        const algoOrders = await ex.fetchOpenAlgoOrders(sym);
+        for (const ao of algoOrders) {
+          const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
+          const isStop = orderType.includes("STOP");
+          const isLimit = orderType.includes("LIMIT") && !orderType.includes("STOP");
+          
+          const shouldCancel = parsed.kind === "cancel_limit_symbol" ? isLimit : isStop;
+          if (shouldCancel) {
+            const algoId = ao.algoId || ao.orderId;
+            if (algoId) {
+              try { await ex.cancelAlgoOrder(sym, algoId); total++; } catch {}
+            }
+          }
+        }
+      } catch {}
+      
       info(
         mode === "console"
-          ? `Снял ${toCancel.length} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров по ${sym}.`
-          : `<b>Снял ${toCancel.length} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров</b> по <code>${sym}</code>.`
+          ? `Снял ${total} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров по ${sym}.`
+          : `<b>Снял ${total} ${parsed.kind==="cancel_limit_symbol"?"LIMIT":"STOP"} ордеров</b> по <code>${sym}</code>.`
       );
     } catch (e:any) {
       info(mode === "console" ? `Ошибка: ${e?.message || e}` : `<b>Ошибка:</b> ${e?.message || e}`);
@@ -242,7 +323,9 @@ export async function runCommand(
     const modeSub = parsed.sub; // all | limit | stop
     const symbols = await collectSymbolsForOrders(ex, book);
     let total = 0;
+    
     for (const sym of symbols) {
+      // Обычные ордера
       try {
         const open = (await ex.fetchOpenOrders(sym)) as any[];
         const toCancel = open.filter((o: any) => {
@@ -252,7 +335,30 @@ export async function runCommand(
         });
         for (const o of toCancel) { try { await ex.cancelOrder(sym, String(o.id)); total++; } catch {} }
       } catch {}
+      
+      // ✅ НОВОЕ: Algo Orders
+      try {
+        const algoOrders = await ex.fetchOpenAlgoOrders(sym);
+        for (const ao of algoOrders) {
+          const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
+          const isStop = orderType.includes("STOP");
+          const isLimit = orderType.includes("LIMIT") && !orderType.includes("STOP");
+          
+          let shouldCancel = false;
+          if (modeSub === "all") shouldCancel = true;
+          else if (modeSub === "limit") shouldCancel = isLimit;
+          else if (modeSub === "stop") shouldCancel = isStop;
+          
+          if (shouldCancel) {
+            const algoId = ao.algoId || ao.orderId;
+            if (algoId) {
+              try { await ex.cancelAlgoOrder(sym, algoId); total++; } catch {}
+            }
+          }
+        }
+      } catch {}
     }
+    
     info(mode === "console" ? `Снял ${total} ордеров (${modeSub}).` : `<b>Снял ${total} ордеров</b> (${modeSub}).`);
     return;
   }
