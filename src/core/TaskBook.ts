@@ -175,18 +175,46 @@ export class TaskBook {
     if (!tasks.length) return;
 
     try {
-      const openOrders = await ex.fetchOpenOrders(symbolCcxt);
-      const openIds = new Set(openOrders.map((o: any) => String(o.id || "")));
+      // ✅ ИСПРАВЛЕНО: Получаем ВСЕ открытые ордера, включая Algo Orders
+      const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+      let algoOrders: any[] = [];
+      try {
+        algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+      } catch {}
+      
+      // Объединяем обычные и Algo ордера для проверки
+      const allOpenOrders = [...open, ...algoOrders];
+      const allOpenOrderIds = new Set<string>();
+      for (const o of allOpenOrders) {
+        const id = String(o.id || o.algoId || o.orderId || "");
+        const clientId = String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "");
+        if (id) allOpenOrderIds.add(id);
+        if (clientId) allOpenOrderIds.add(clientId);
+      }
+      
       const posSize = Math.abs(await ex.fetchPositionSize(symbolCcxt));
       const flat = posSize < Math.max(minQty * 0.5, 1e-12);
 
       for (const task of tasks) {
-        // Пропускаем задачи в статусе "live" или если есть активные входные ордера
-        if (task.status === "live" || task.status === "done" || task.status === "canceled") continue;
+        // ✅ ИСПРАВЛЕНО: Пропускаем активные статусы задач
+        // Активные статусы: задачи, которые еще работают или ожидают исполнения
+        const activeStatuses: TaskStatus[] = ["queued", "waiting_fill", "placing_bracket", "filled", "live"];
+        if (activeStatuses.includes(task.status)) continue;
         
-        const hasEntryOrders = (task.entryOrderIds || []).some(id => openIds.has(id));
+        // Пропускаем финальные статусы (они уже обработаны)
+        if (task.status === "done" || task.status === "canceled") continue;
         
-        // Если нет входных ордеров на бирже и позиция flat → удаляем task
+        // ✅ ИСПРАВЛЕНО: Проверяем ордера по ID и clientOrderId (как в engine.ts)
+        const hasEntryOrders = (task.entryOrderIds || []).some(id => {
+          const idStr = String(id);
+          return allOpenOrderIds.has(idStr) || 
+                 allOpenOrders.some((o: any) => 
+                   String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
+                 );
+        });
+        
+        // Висячая задача: нет входных ордеров на бирже, позиция flat, и статус не активный
+        // Удаляем только задачи со статусом "error" или "flat" (или другие неактивные статусы)
         if (!hasEntryOrders && flat) {
           log(`🧹 Висячая задача #${task.id} (${symbolCcxt}): отложек нет, позиции нет → удаляю`);
           this.remove(task.id);
