@@ -978,6 +978,7 @@ export async function runCommand(
         const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const flat = posSize < Math.max(minQty * 0.5, 1e-12);
         const wasInPosition = lastSize > minQty * 0.5;
+        const taskAge = Date.now() - TASK_CREATED_AT; // Возраст задачи в миллисекундах
         const manuallyClosed = wasInPosition && flat && taskAge >= 2000; // Минимум 2 секунды для защиты
         
         if (manuallyClosed) {
