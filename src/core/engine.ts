@@ -1015,12 +1015,12 @@ export async function runCommand(
         // ✅ КРИТИЧНО: Получаем ВСЕ открытые ордера, включая Algo Orders
         const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
         let algoOrders: any[] = [];
+        let algoOrdersFetchFailed = false; // ⚠️ Флаг ошибки получения Algo Orders
         try {
           algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
         } catch (e) {
-          if (mode === "console") {
-            console.log(`[DEBUG] Failed to fetch Algo Orders: ${e}`);
-          }
+          algoOrdersFetchFailed = true; // ⚠️ Не удалось получить Algo Orders
+          console.warn(`[WARN] Failed to fetch Algo Orders for ${symbolCcxt}: ${e}`);
         }
         
         // Объединяем обычные и Algo ордера для проверки
@@ -1036,7 +1036,7 @@ export async function runCommand(
         
         // ✅ ЛОГИРОВАНИЕ: что мы получили с биржи
         if (mode === "console" && (posSize > 0 || entryIds.length > 0)) {
-          console.log(`[DEBUG] Fetched orders: regular=${open.length}, algo=${algoOrders.length}, allOpenOrderIds.size=${allOpenOrderIds.size}`);
+          console.log(`[DEBUG] Fetched orders: regular=${open.length}, algo=${algoOrders.length}, algoFailed=${algoOrdersFetchFailed}, allOpenOrderIds.size=${allOpenOrderIds.size}`);
           console.log(`[DEBUG] Entry IDs we're tracking: ${Array.from(entryIds).join(", ")}`);
           console.log(`[DEBUG] All open order IDs: ${Array.from(allOpenOrderIds).join(", ")}`);
         }
@@ -1126,11 +1126,12 @@ export async function runCommand(
           // 2. Все ордера исчезли из списка открытых (allOrdersGone)
           // 3. Прошло минимум 3 секунды после создания задачи (защита от race condition)
           // 4. Ордера были видны хотя бы раз (ordersEverSeen) - защита от ложных срабатываний
+          // 5. ⚠️ КРИТИЧНО: Algo Orders были успешно получены (не было ошибки)
           const canRemove = flat && entryIds.length > 0 && 
-            allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen;
+            allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen && !algoOrdersFetchFailed;
           
           if (mode === "console" && entryIds.length > 0) {
-            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, canRemove=${canRemove}`);
+            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, canRemove=${canRemove}`);
           }
           
           if (canRemove) {
