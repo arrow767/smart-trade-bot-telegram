@@ -120,13 +120,17 @@ export function startTaskRecoveryLoop(
   const enabled = String(process.env.RECOVERY_ENABLED || "true").toLowerCase() === "true" || String(process.env.RECOVERY_ENABLED || "true") === "1";
   if (!enabled) return { stop: () => {} };
 
+  const orphanEnabled = String(process.env.RECOVERY_ORPHAN_ENABLED || "true").toLowerCase() === "true" || String(process.env.RECOVERY_ORPHAN_ENABLED || "true") === "1";
+  const orphanGraceMs = Number(process.env.RECOVERY_ORPHAN_GRACE_MS || 60_000);
+  const emptySinceBySymbol = new Map<string, number>();
+
   const timer = setInterval(async () => {
     try {
       const tasks = book.list().filter((t) => t.status !== "done" && t.status !== "canceled");
       if (!tasks.length) return;
 
       const positions = await ex.fetchAllOpenPositions().catch(() => []);
-      if (!Array.isArray(positions) || positions.length === 0) return;
+      const posArr = Array.isArray(positions) ? positions : [];
 
       const bySymbol = new Map<string, Task[]>();
       for (const t of tasks) {
@@ -135,11 +139,58 @@ export function startTaskRecoveryLoop(
       }
 
       for (const [symbol, ts] of bySymbol.entries()) {
-        const pos = positions.find((p: any) => p.symbol === symbol);
-        if (!pos) continue;
-        const task = pickTaskForSymbol(ts, pos.side);
-        if (!task) continue;
-        await ensureBracketsForTask(ex, task, pos, log).catch(() => {});
+        const now = Date.now();
+        const pos = posArr.find((p: any) => p.symbol === symbol);
+
+        // 1) Если есть позиция — обеспечиваем SL/TP для связанной задачи
+        if (pos) {
+          emptySinceBySymbol.delete(symbol);
+          const task = pickTaskForSymbol(ts, pos.side);
+          if (task) {
+            await ensureBracketsForTask(ex, task, pos, log).catch(() => {});
+          }
+          continue;
+        }
+
+        // 2) Если позиции нет — проверяем "висячие" tasks (нет ордеров вообще) с grace-time
+        if (!orphanEnabled) {
+          emptySinceBySymbol.delete(symbol);
+          continue;
+        }
+
+        let open: any[] = [];
+        let algo: any[] = [];
+        let openFailed = false;
+        let algoFailed = false;
+        try { open = (await ex.fetchOpenOrders(symbol)) as any[]; } catch { openFailed = true; }
+        try { algo = await ex.fetchOpenAlgoOrders(symbol); } catch { algoFailed = true; }
+
+        // Если не удалось получить список ордеров — не принимаем решений на удаление
+        if (openFailed || algoFailed) {
+          emptySinceBySymbol.delete(symbol);
+          continue;
+        }
+
+        const anyOrders = (open?.length || 0) + (algo?.length || 0);
+        if (anyOrders > 0) {
+          emptySinceBySymbol.delete(symbol);
+          continue;
+        }
+
+        const emptySince = emptySinceBySymbol.get(symbol);
+        if (!emptySince) {
+          emptySinceBySymbol.set(symbol, now);
+          continue;
+        }
+
+        if (now - emptySince >= Math.max(5_000, orphanGraceMs)) {
+          // Нет позиций и нет ордеров вообще — удаляем зависшие задачи по символу
+          for (const t of ts) {
+            book.remove(t.id);
+          }
+          emptySinceBySymbol.delete(symbol);
+          log(`🧹 Recovery: висячие задачи по ${symbol} удалены (нет позиций и ордеров > ${Math.round(Math.max(5_000, orphanGraceMs) / 1000)}s)`);
+        }
       }
     } catch {}
   }, Math.max(2_000, intervalMs));

@@ -103,6 +103,11 @@ OBSERVER_INTERVAL_MS=400
 # и если SL/TP не выставлены при существующей позиции — довыставляет.
 RECOVERY_ENABLED=true
 RECOVERY_INTERVAL_MS=10000
+
+# Удаление висячих задач: если по символу НЕТ позиций и НЕТ никаких открытых ордеров
+# (обычных и algo), и так держится дольше grace-time — задача(и) удаляются.
+RECOVERY_ORPHAN_ENABLED=true
+RECOVERY_ORPHAN_GRACE_MS=60000
 ```
 
 > Примечание: в вашем `env.example` флаг `TELEGRAF_SKIP_REDACT` задублирован — это не мешает, но в реальном `.env` лучше оставить **одну** строку.
