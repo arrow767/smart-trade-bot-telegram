@@ -1213,6 +1213,22 @@ export async function runCommand(
 
           // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
           if (!noPreset) {
+            const hasClosePositionConditional = (orders: any[]) => {
+              for (const o of orders || []) {
+                const t = String(o?.type || o?.strategyType || "").toUpperCase();
+                const isStopOrTp = t.includes("STOP") || t.includes("TAKE_PROFIT");
+                const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+                if (isStopOrTp && cp) return true;
+              }
+              return false;
+            };
+
+            const isIgnorableAlgoClosePositionDup = (e: any) => {
+              const msg = String(e?.message || e || "");
+              const code = Number(e?.info?.code ?? e?.code ?? NaN);
+              return code === -4130 || /-4130/.test(msg) || /closePosition/i.test(msg) && /existing/i.test(msg);
+            };
+
             const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
             const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
@@ -1228,20 +1244,34 @@ export async function runCommand(
             // ⚠️ КРИТИЧНО: slPxCurrent устанавливается ТОЛЬКО при успешном выставлении
             if (!slPxCurrent || Math.abs(slPxCurrent - safeSL) > 1e-9) {
               try {
+                // ✅ Анти-спам: если уже есть closePosition STOP/TP (обычно SL уже стоит) — не дергаем API
+                if (hasClosePositionConditional(allOpenOrders)) {
+                  slPxCurrent = safeSL;
+                } else {
                 await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
                 slPxCurrent = safeSL;
                 info(mode === "console" 
                   ? `✅ SL выставлен: ${safeSL}`
                   : `<b>✅ SL выставлен:</b> ${safeSL}`
                 );
+                }
               } catch (e: any) {
-                console.error(`Failed to place SL: ${e?.message || e}`);
-                const errMsg = String(e?.message || e || "Unknown error");
-                info(mode === "console" 
-                  ? `⚠️ Ошибка выставления SL: ${errMsg}`
-                  : `<b>⚠️ Ошибка выставления SL:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
-                );
-                // НЕ устанавливаем slPxCurrent — следующая итерация попытается снова
+                // Binance: -4130 означает, что уже есть открытый closePosition STOP/TP в этом направлении.
+                // Это не критично (позиция уже "защищена"), поэтому не шлем это в Telegram.
+                if (isIgnorableAlgoClosePositionDup(e)) {
+                  slPxCurrent = safeSL;
+                  if (mode === "console") {
+                    console.warn(`SL already exists (ignored -4130): ${e?.message || e}`);
+                  }
+                } else {
+                  console.error(`Failed to place SL: ${e?.message || e}`);
+                  const errMsg = String(e?.message || e || "Unknown error");
+                  info(mode === "console" 
+                    ? `⚠️ Ошибка выставления SL: ${errMsg}`
+                    : `<b>⚠️ Ошибка выставления SL:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                  );
+                  // НЕ устанавливаем slPxCurrent — следующая итерация попытается снова
+                }
               }
             }
 
