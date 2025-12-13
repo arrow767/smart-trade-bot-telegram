@@ -9,6 +9,8 @@ export type ParsedCmd =
       rawTicker: string;
       legs: TradeLeg[];
       presetName: string;
+      // ✅ НОВОЕ: если true — presetName выбран автоматически по стороне (long/short) из конфигурации
+      presetAuto?: boolean;
       dryRun: boolean;
       market?: { usd: number } | null;
       riskUsdOverride?: number;
@@ -25,7 +27,18 @@ export type ParsedCmd =
   | { kind: "edit"; id: number; dir: "l" | "s"; rawTicker: string; legs: TradeLeg[] }
   | { kind: "preset_list" }
   | { kind: "preset_show"; name: string }
-  | { kind: "preset_set"; name: string; risk?: number; tp?: number[]; ratio?: number[]; makeDefault?: boolean }
+  | {
+      kind: "preset_set";
+      name: string;
+      risk?: number;
+      tp?: number[];
+      ratio?: number[];
+      // legacy: установить дефолт на обе стороны
+      makeDefault?: boolean;
+      // ✅ НОВОЕ: отдельные дефолты
+      makeDefaultLong?: boolean;
+      makeDefaultShort?: boolean;
+    }
   | { kind: "preset_delete"; name: string }
   | { kind: "task_info"; id: number }
   | { kind: "orders"; symbol?: string }

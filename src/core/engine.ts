@@ -5,6 +5,8 @@
   deletePreset,
   getDefaultPresetName,
   setDefaultPreset,
+  getDefaultPresetNameBySide,
+  setDefaultPresetBySide,
   TradingPreset,
 } from "../config/trading_config";
 import { normalizeTickerToUsdt } from "./SymbolResolver";
@@ -366,26 +368,36 @@ export async function runCommand(
   // --- пресеты ---
   if (parsed.kind === "preset_list") {
     const list = await listPresets();
-    const def = await getDefaultPresetName();
+    const defLong = await getDefaultPresetNameBySide("long");
+    const defShort = await getDefaultPresetNameBySide("short");
     info(
       formatPresetList(
         mode,
-        list.map((p) => ({ name: p.config_name, isDefault: p.config_name === def }))
+        list.map((p) => {
+          const isL = p.config_name === defLong;
+          const isS = p.config_name === defShort;
+          const tag = isL && isS ? " [L,S]" : isL ? " [L]" : isS ? " [S]" : "";
+          return { name: `${p.config_name}${tag}`, isDefault: isL || isS };
+        })
       )
     );
     return;
   }
 
   if (parsed.kind === "preset_show") {
-    const def = await getDefaultPresetName();
+    const defLong = await getDefaultPresetNameBySide("long");
+    const defShort = await getDefaultPresetNameBySide("short");
     const p = await getPreset(parsed.name);
+    const isL = p.config_name === defLong;
+    const isS = p.config_name === defShort;
+    const tag = isL && isS ? " (default: long+short)" : isL ? " (default: long)" : isS ? " (default: short)" : "";
     info(
       formatPreset(mode, {
-        name: p.config_name,
+        name: `${p.config_name}${tag}`,
         risk: p.trade_risk,
         tp: p.take_profit,
         ratio: p.take_profit_ratio,
-        isDefault: p.config_name === def,
+        isDefault: isL || isS,
       })
     );
     return;
@@ -409,16 +421,27 @@ export async function runCommand(
     }
     await upsertPreset(next);
     if (parsed.makeDefault) {
+      // legacy: ставим дефолт на обе стороны
       await setDefaultPreset(next.config_name);
     }
-    const def = await getDefaultPresetName();
+    if (parsed.makeDefaultLong) {
+      await setDefaultPresetBySide("long", next.config_name);
+    }
+    if (parsed.makeDefaultShort) {
+      await setDefaultPresetBySide("short", next.config_name);
+    }
+    const defLong = await getDefaultPresetNameBySide("long");
+    const defShort = await getDefaultPresetNameBySide("short");
+    const isL = next.config_name === defLong;
+    const isS = next.config_name === defShort;
+    const tag = isL && isS ? " (default: long+short)" : isL ? " (default: long)" : isS ? " (default: short)" : "";
     info(
       formatPreset(mode, {
-        name: next.config_name,
+        name: `${next.config_name}${tag}`,
         risk: next.trade_risk,
         tp: next.take_profit,
         ratio: next.take_profit_ratio,
-        isDefault: next.config_name === def,
+        isDefault: isL || isS,
       })
     );
     return;
@@ -710,7 +733,10 @@ export async function runCommand(
   const sideEntry = side === "long" ? "buy" : "sell";
   const sideExit = side === "long" ? "sell" : "buy";
 
-  const preset = await getPreset(presetName);
+  // ✅ НОВОЕ: авто-дефолт пресета отдельно для long/short
+  const presetNameEffective =
+    (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : presetName;
+  const preset = await getPreset(presetNameEffective);
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   
   // ✅ Пытаемся загрузить market (с автоперезагрузкой если не найден), но не прерываем работу
@@ -739,7 +765,7 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName, riskUsd: riskUsdOverride });
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: riskUsdOverride });
     book.setEntryOrders(task, [] as string[]);
 
     book.set(task, "waiting_fill");
@@ -1005,7 +1031,7 @@ export async function runCommand(
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName, riskUsd: riskUsdOverride }
+    { side, totalUsd, presetName: presetNameEffective, riskUsd: riskUsdOverride }
   );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);

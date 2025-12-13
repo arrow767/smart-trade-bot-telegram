@@ -96,7 +96,13 @@ export function parseLine(line: string): ParsedCmd | null {
       const tp = parseNumsCSV(kv.get("tp") || kv.get("take_profit"));
       const ratio = parseNumsCSV(kv.get("ratio") || kv.get("take_profit_ratio"));
       const makeDefault = kv.get("default") === "1" || kv.get("default") === "true";
-      return { kind: "preset_set", name, risk, tp, ratio, makeDefault };
+      const makeDefaultLong =
+        kv.get("default_long") === "1" || kv.get("default_long") === "true" ||
+        kv.get("default_l") === "1" || kv.get("default_l") === "true";
+      const makeDefaultShort =
+        kv.get("default_short") === "1" || kv.get("default_short") === "true" ||
+        kv.get("default_s") === "1" || kv.get("default_s") === "true";
+      return { kind: "preset_set", name, risk, tp, ratio, makeDefault, makeDefaultLong, makeDefaultShort };
     }
 
     if (sub.startsWith("default")) {
@@ -198,6 +204,7 @@ export function parseLine(line: string): ParsedCmd | null {
   // MARKET-вход краткий: l <sym> <usd> [preset|-]
   if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || Number.isNaN(parseNumberToken(p[idx+3])))) {
     const usd = parseHumanUsd(p[idx+2]);
+    const presetAuto = p.length === idx + 3;
     const presetArg = p[idx+3] || DEFAULT_PRESET;
     const noPreset = presetArg === "-" || presetArg === "—"; // дефис или тире
     const presetName = noPreset ? DEFAULT_PRESET : presetArg;
@@ -208,6 +215,7 @@ export function parseLine(line: string): ParsedCmd | null {
       legs: [],
       market: { usd },
       presetName,
+      presetAuto,
       dryRun: false,
       riskUsdOverride: riskOverride,
       noPreset, // ✅ НОВОЕ
@@ -227,6 +235,7 @@ export function parseLine(line: string): ParsedCmd | null {
   let presetName = DEFAULT_PRESET;
   let dryRun = false;
   let noPreset = false; // ✅ НОВОЕ
+  let presetAuto = true;
   
   for (; i < p.length; i++) {
     const tok = p[i].toLowerCase();
@@ -240,7 +249,8 @@ export function parseLine(line: string): ParsedCmd | null {
       continue;
     }
     presetName = p[i];
+    presetAuto = false;
   }
 
-  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, dryRun, market: null, riskUsdOverride: riskOverride, noPreset };
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, presetAuto, dryRun, market: null, riskUsdOverride: riskOverride, noPreset };
 }

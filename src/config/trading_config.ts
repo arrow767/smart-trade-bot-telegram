@@ -9,7 +9,11 @@ export type TradingPreset = {
 };
 
 export type TradingConfigFile = {
-  default: string;              // дефолтный пресет
+  // legacy default (один на всё); оставляем для обратной совместимости
+  default?: string;
+  // ✅ НОВОЕ: два дефолта — отдельно для long и short
+  default_long?: string;
+  default_short?: string;
   presets: Record<string, TradingPreset>;
 };
 
@@ -27,6 +31,8 @@ const DEFAULT_PRESET: TradingPreset = {
 
 const DEFAULT_FILE: TradingConfigFile = {
   default: DEFAULT_PRESET_NAME,
+  default_long: DEFAULT_PRESET_NAME,
+  default_short: DEFAULT_PRESET_NAME,
   presets: { [DEFAULT_PRESET_NAME]: DEFAULT_PRESET },
 };
 
@@ -45,11 +51,23 @@ export async function loadConfig(): Promise<TradingConfigFile> {
   try {
     const parsed = JSON.parse(raw) as TradingConfigFile;
     if (!parsed || typeof parsed !== "object") throw new Error("bad config");
-    parsed.default ||= DEFAULT_PRESET_NAME;
+
+    // миграция: если есть только legacy default — используем его для обеих сторон
+    const legacyDefault = (parsed.default || DEFAULT_PRESET_NAME).trim() || DEFAULT_PRESET_NAME;
+    parsed.default ||= legacyDefault;
+    parsed.default_long ||= legacyDefault;
+    parsed.default_short ||= legacyDefault;
+
     parsed.presets ||= {};
-    if (!parsed.presets[parsed.default]) {
-      parsed.presets[parsed.default] = DEFAULT_PRESET;
-    }
+    const ensurePreset = (name?: string) => {
+      const key = (name || DEFAULT_PRESET_NAME).trim() || DEFAULT_PRESET_NAME;
+      if (!parsed.presets[key]) parsed.presets[key] = DEFAULT_PRESET;
+      return key;
+    };
+    parsed.default = ensurePreset(parsed.default);
+    parsed.default_long = ensurePreset(parsed.default_long);
+    parsed.default_short = ensurePreset(parsed.default_short);
+
     return parsed;
   } catch {
     // восстановление файла
@@ -71,19 +89,38 @@ export async function listPresets(): Promise<TradingPreset[]> {
 
 export async function getDefaultPresetName(): Promise<string> {
   const cfg = await loadConfig();
-  return cfg.default || DEFAULT_PRESET_NAME;
+  return (cfg.default || cfg.default_long || cfg.default_short || DEFAULT_PRESET_NAME).trim() || DEFAULT_PRESET_NAME;
 }
 
 export async function setDefaultPreset(name: string): Promise<void> {
   const cfg = await loadConfig();
   if (!cfg.presets[name]) throw new Error(`Preset "${name}" не существует`);
   cfg.default = name;
+  // legacy set: если пользователь ставит "default", считаем что это дефолт для обеих сторон
+  cfg.default_long = name;
+  cfg.default_short = name;
+  await saveConfig(cfg);
+}
+
+export async function getDefaultPresetNameBySide(side: "long" | "short"): Promise<string> {
+  const cfg = await loadConfig();
+  const key = side === "long" ? (cfg.default_long || cfg.default || DEFAULT_PRESET_NAME) : (cfg.default_short || cfg.default || DEFAULT_PRESET_NAME);
+  return (key || DEFAULT_PRESET_NAME).trim() || DEFAULT_PRESET_NAME;
+}
+
+export async function setDefaultPresetBySide(side: "long" | "short", name: string): Promise<void> {
+  const cfg = await loadConfig();
+  if (!cfg.presets[name]) throw new Error(`Preset "${name}" не существует`);
+  if (side === "long") cfg.default_long = name;
+  else cfg.default_short = name;
+  // держим legacy default не пустым
+  cfg.default ||= name;
   await saveConfig(cfg);
 }
 
 export async function getPreset(name?: string): Promise<TradingPreset> {
   const cfg = await loadConfig();
-  const key = (name || cfg.default || DEFAULT_PRESET_NAME).trim();
+  const key = (name || cfg.default || cfg.default_long || cfg.default_short || DEFAULT_PRESET_NAME).trim();
   return cfg.presets[key] || DEFAULT_PRESET;
 }
 
@@ -101,7 +138,9 @@ export async function upsertPreset(preset: TradingPreset): Promise<void> {
 export async function deletePreset(name: string): Promise<void> {
   const cfg = await loadConfig();
   if (!cfg.presets[name]) throw new Error(`Preset "${name}" не найден`);
-  if (cfg.default === name) throw new Error(`Нельзя удалить дефолтный пресет "${name}"`);
+  if (cfg.default === name || cfg.default_long === name || cfg.default_short === name) {
+    throw new Error(`Нельзя удалить дефолтный пресет "${name}"`);
+  }
   delete cfg.presets[name];
   await saveConfig(cfg);
 }

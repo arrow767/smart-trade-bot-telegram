@@ -178,6 +178,9 @@ desiredSL = (long)  entryAvg - perContractLoss
 
 * `preset list` / `preset show <name>`
 * `preset set <name> risk=100 tp=3,5,7 ratio=35,30,35 [default=true]`
+* ✅ Два дефолта:
+  - `preset set <name> default_long=true` (дефолт для long)
+  - `preset set <name> default_short=true` (дефолт для short)
 * `preset delete <name>`
 
 ### Позиции / Депозит / Задачи
