@@ -4,6 +4,7 @@ import { Telegraf, Markup } from "telegraf";
 import { BinanceFutures } from "../exch/BinanceFutures";
 import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "../core/engine";
 import { banner, formatTradeNotification } from "../core/format";
+import { startTaskRecoveryLoop } from "../core/recovery";
 import { setDefaultResultOrder } from "dns";
 import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetName, setDefaultPreset } from "../config/trading_config";
 setDefaultResultOrder?.("ipv4first");  // принудительно IPv4 в Node
@@ -975,6 +976,7 @@ bot.catch(async (err, ctx) => {
 bot.launch().then(async ()=> {
   await ex.init(); // Синхронизация времени перед первым использованием
   await ex.loadMarkets();
+  startTaskRecoveryLoop(ex, book, (m) => console.log(m));
   console.log("Telegram bot started.");
 }).catch((e)=>{ console.error(e); });
 process.once("SIGINT", () => bot.stop("SIGINT"));

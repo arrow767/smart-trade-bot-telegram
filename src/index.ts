@@ -4,12 +4,14 @@ import readline from "node:readline";
 import { BinanceFutures } from "./exch/BinanceFutures";
 import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "./core/engine";
 import { banner } from "./core/format";
+import { startTaskRecoveryLoop } from "./core/recovery";
 
 async function main(){
   const ex = new BinanceFutures();
   await ex.init(); // Синхронизация времени перед первым запросом
   await ex.loadMarkets();
   const book = new TaskBook();
+  startTaskRecoveryLoop(ex, book, (m) => console.log(m));
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
 
   console.log(banner("console",
