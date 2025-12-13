@@ -752,6 +752,33 @@ export async function runCommand(
         let slPxCurrent: number | undefined;
         const tpIndexById = new Map<string, number>();
 
+        const hasClosePositionConditional = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || "").toUpperCase();
+            const isStopOrTp = t.includes("STOP") || t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (isStopOrTp && cp) return true;
+          }
+          return false;
+        };
+
+        const hasAnyReduceOnlyTP = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || "").toUpperCase();
+            const isLimit = t.includes("LIMIT") && !t.includes("STOP");
+            const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (isLimit && ro && !cp) return true;
+          }
+          return false;
+        };
+
+        const isIgnorableAlgoClosePositionDup = (e: any) => {
+          const msg = String(e?.message || e || "");
+          const code = Number(e?.info?.code ?? e?.code ?? NaN);
+          return code === -4130 || /-4130/.test(msg) || (/closePosition/i.test(msg) && /existing/i.test(msg));
+        };
+
         for (;;) {
           const tick = await ex.fetchTicker(symbolCcxt);
           const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
@@ -761,17 +788,36 @@ export async function runCommand(
           const posSize = Math.abs(my?.contracts ?? 0);
           const entryAvg = Number(my?.entryPrice ?? 0) || 0;
 
+          // ✅ Надёжность: проверяем реальное состояние ордеров каждый цикл.
+          const open = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+          let algo: any[] = [];
+          try { algo = await ex.fetchOpenAlgoOrders(symbolCcxt); } catch {}
+          const allOpen = [...open, ...algo];
+          const hasSLNow = hasClosePositionConditional(allOpen);
+          const hasTPNow = hasAnyReduceOnlyTP(open);
+
+          // Если пользователь снял SL/TP руками — сбрасываем флаги, чтобы довыставить заново
+          if (!hasSLNow) slPxCurrent = undefined;
+          if (!hasTPNow) tpsPlaced = false;
+
           const delta = posSize - lastSize;
           const increased = delta > 1e-9;
 
-          if (increased && posSize > 0) {
+          const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
+          const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
+          const shouldPlaceTP_SL = hasPosition && (!hasSLNow || !hasTPNow);
+
+          if (shouldPlaceTP_SL) {
             const filters = ex.getSymbolFilters(symbolCcxt);
             const positionUsd = posSize * entryAvg;
 
             const totalUsd = task.totalUsd ?? positionUsd;
-          const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
-          const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
-          const effectiveRiskUsd = baseRisk * factor;
+            const baseRisk =
+              (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
+                ? task.riskUsd
+                : (Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk);
+            const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
+            const effectiveRiskUsd = baseRisk * factor;
 
             // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
             if (!noPreset) {
@@ -783,11 +829,19 @@ export async function runCommand(
                 throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
               }
 
-              await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
-              await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
-              slPxCurrent = safeSL;
+              // SL ставим только если он реально отсутствует
+              if (!hasSLNow) {
+                await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
+                try {
+                  await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+                } catch (e: any) {
+                  if (!isIgnorableAlgoClosePositionDup(e)) throw e;
+                }
+                slPxCurrent = safeSL;
+              }
 
-              if (!tpsPlaced) {
+              // TP ставим только если их реально нет
+              if (!hasTPNow) {
                 const planningPreset = { ...preset, trade_risk: baseRisk } as any;
                 const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
@@ -821,8 +875,6 @@ export async function runCommand(
             book.set(task, "live");
           }
 
-          const open = await ex.fetchOpenOrders(symbolCcxt);
-          const nonEntryOpen = open;
           const f = ex.getSymbolFilters(symbolCcxt);
           const flat = Math.abs(await ex.fetchPositionSize(symbolCcxt)) < Math.max((f.minQty||0)*0.5, 1e-12);
           if (flat) {
@@ -969,6 +1021,22 @@ export async function runCommand(
       let tpsPlaced = false;
       let slPxCurrent: number | undefined;
       const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
+
+        const hasClosePositionConditional = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || "").toUpperCase();
+            const isStopOrTp = t.includes("STOP") || t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (isStopOrTp && cp) return true;
+          }
+          return false;
+        };
+
+        const isIgnorableAlgoClosePositionDup = (e: any) => {
+          const msg = String(e?.message || e || "");
+          const code = Number(e?.info?.code ?? e?.code ?? NaN);
+          return code === -4130 || /-4130/.test(msg) || (/closePosition/i.test(msg) && /existing/i.test(msg));
+        };
 
       // НОВОЕ: учёт исчезнувших входов с задержкой-подтверждением
       const MANUAL_GONE_GRACE_MS = 4000;
@@ -1183,9 +1251,26 @@ export async function runCommand(
         // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
         // Если позиция есть (posSize > 0) и TP/SL не выставлены → выставляем их
         // Не зависим от lastSize, increased и других сложных условий
+        const hasAnyReduceOnlyTP = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || "").toUpperCase();
+            const isLimit = t.includes("LIMIT") && !t.includes("STOP");
+            const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (isLimit && ro && !cp) return true;
+          }
+          return false;
+        };
+
+        // ✅ Надёжность: если SL/TP сняты руками, сбрасываем флаги и довыставляем
+        const hasSLNow = hasClosePositionConditional(allOpenOrders);
+        const hasTPNow = hasAnyReduceOnlyTP(open);
+        if (!hasSLNow) slPxCurrent = undefined;
+        if (!hasTPNow) tpsPlaced = false;
+
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
-        const shouldPlaceTP_SL = hasPosition && (!tpsPlaced || !slPxCurrent);
+        const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow);
         
         // ✅ ЛОГИРОВАНИЕ для отладки
         if (mode === "console") {
@@ -1216,22 +1301,6 @@ export async function runCommand(
 
           // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
           if (!noPreset) {
-            const hasClosePositionConditional = (orders: any[]) => {
-              for (const o of orders || []) {
-                const t = String(o?.type || o?.strategyType || "").toUpperCase();
-                const isStopOrTp = t.includes("STOP") || t.includes("TAKE_PROFIT");
-                const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
-                if (isStopOrTp && cp) return true;
-              }
-              return false;
-            };
-
-            const isIgnorableAlgoClosePositionDup = (e: any) => {
-              const msg = String(e?.message || e || "");
-              const code = Number(e?.info?.code ?? e?.code ?? NaN);
-              return code === -4130 || /-4130/.test(msg) || /closePosition/i.test(msg) && /existing/i.test(msg);
-            };
-
             const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
             const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
