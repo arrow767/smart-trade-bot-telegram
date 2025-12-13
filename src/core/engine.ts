@@ -1120,6 +1120,17 @@ export async function runCommand(
           });
           
           const timeSinceCreated = Date.now() - TASK_CREATED_AT;
+
+          // ✅ ДОП. ЗАЩИТА: если на символе есть какие-то ордера кроме входных этой задачи (например SL/TP),
+          // то НЕ считаем это "ручным снятием всех входов" и НЕ удаляем задачу.
+          const entrySet = new Set((entryIds || []).map((x) => String(x)));
+          const otherOpenOrders = allOpenOrders.filter((o: any) => {
+            const oId = String(o.id || o.algoId || o.orderId || "");
+            const oClientId = String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "");
+            const isEntry = (oId && entrySet.has(oId)) || (oClientId && entrySet.has(oClientId));
+            return !isEntry;
+          });
+          const noOtherOpenOrders = otherOpenOrders.length === 0;
           
           // ✅ МАКСИМАЛЬНО ПРОСТАЯ ПРОВЕРКА:
           // 1. Позиция пустая (flat)
@@ -1127,11 +1138,12 @@ export async function runCommand(
           // 3. Прошло минимум 3 секунды после создания задачи (защита от race condition)
           // 4. Ордера были видны хотя бы раз (ordersEverSeen) - защита от ложных срабатываний
           // 5. ⚠️ КРИТИЧНО: Algo Orders были успешно получены (не было ошибки)
+          // 6. ⚠️ КРИТИЧНО: На символе нет других ордеров (SL/TP/прочие) кроме входных этой задачи
           const canRemove = flat && entryIds.length > 0 && 
-            allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen && !algoOrdersFetchFailed;
+            allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen && !algoOrdersFetchFailed && noOtherOpenOrders;
           
           if (mode === "console" && entryIds.length > 0) {
-            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, canRemove=${canRemove}`);
+            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, noOtherOpenOrders=${noOtherOpenOrders}, canRemove=${canRemove}`);
           }
           
           if (canRemove) {
