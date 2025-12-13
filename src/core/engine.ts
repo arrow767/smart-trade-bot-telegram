@@ -739,7 +739,7 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName });
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName, riskUsd: riskUsdOverride });
     book.setEntryOrders(task, [] as string[]);
 
     book.set(task, "waiting_fill");
@@ -953,7 +953,7 @@ export async function runCommand(
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName }
+    { side, totalUsd, presetName, riskUsd: riskUsdOverride }
   );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);
@@ -1207,7 +1207,10 @@ export async function runCommand(
 
           const totalPlannedUsd = task.totalUsd ?? positionUsd;
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
-          const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk;
+          const baseRisk =
+            (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
+              ? task.riskUsd
+              : (Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk);
           const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
           const effectiveRiskUsd = baseRisk * factor;
 

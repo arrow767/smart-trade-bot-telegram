@@ -58,6 +58,11 @@ export type Task = {
   side?: "long" | "short";
   totalUsd?: number;
   presetName?: string;
+  /**
+   * Кастомный риск в USD, если пользователь вводил его в начале команды, напр:
+   * "3 l hype 200 28.34" → riskUsd=3
+   */
+  riskUsd?: number;
 };
 
 export const DEFAULT_PRESET = "4h";

@@ -78,13 +78,18 @@ export class TaskBook {
           side: (o.side === "long" || o.side === "short") ? o.side : undefined,
           totalUsd: Number(o.totalUsd || 0) || undefined,
           presetName: o.presetName ? String(o.presetName) : undefined,
+          riskUsd: Number(o.riskUsd || 0) || undefined,
         };
         this.tasks.set(t.id, t);
       }
     } catch {}
   }
 
-  add(symbolCcxt: string, label: string, extras?: { side?: "long"|"short"; totalUsd?: number; presetName?: string }) {
+  add(
+    symbolCcxt: string,
+    label: string,
+    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number }
+  ) {
     const t: Task = {
       id: TASK_ID_SEQ++,
       symbolCcxt,
@@ -95,6 +100,7 @@ export class TaskBook {
       side: extras?.side,
       totalUsd: extras?.totalUsd,
       presetName: extras?.presetName,
+      riskUsd: (typeof extras?.riskUsd === "number" && Number.isFinite(extras.riskUsd) && extras.riskUsd > 0) ? extras.riskUsd : undefined,
     };
     this.tasks.set(t.id, t);
     this.save();

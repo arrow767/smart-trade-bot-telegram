@@ -74,7 +74,10 @@ async function ensureBracketsForTask(
 
   const positionUsd = posSize * entryAvg;
   const totalPlannedUsd = task.totalUsd ?? positionUsd;
-  const baseRisk = Number.isFinite(preset.trade_risk) && preset.trade_risk > 0 ? preset.trade_risk : 0;
+  const baseRisk =
+    (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
+      ? task.riskUsd
+      : (Number.isFinite(preset.trade_risk) && preset.trade_risk > 0 ? preset.trade_risk : 0);
   const factor = Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
   const effectiveRiskUsd = baseRisk * factor;
 
