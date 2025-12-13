@@ -12,6 +12,13 @@ function parseNumsCSV(s?: string): number[] | undefined {
   return nums;
 }
 
+function parseNumberToken(s?: string): number {
+  if (!s) return NaN;
+  const raw = String(s).replace(/_/g, "").trim().replace(",", ".");
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : NaN;
+}
+
 // Парсинг объёма USD с суффиксами k/m/kk и разделителями '_'
 function parseHumanUsd(s?: string): number {
   if (!s) return NaN;
@@ -20,7 +27,7 @@ function parseHumanUsd(s?: string): number {
   const isK = /([kк])$/i.test(raw);
   const isM = /([mм])$/i.test(raw);
   const numStr = raw.replace(/(kk|кк|k|к|m|м)$/i, "");
-  const base = Number(numStr);
+  const base = parseNumberToken(numStr);
   if (!Number.isFinite(base)) return NaN;
   if (isKK || isM) return base * 1_000_000;
   if (isK) return base * 1_000;
@@ -48,7 +55,7 @@ export function parseLine(line: string): ParsedCmd | null {
   let riskOverride: number | undefined;
   let idx = 0;
   const first = p[0];
-  const mRisk = first && /^\d+(?:\.\d+)?\$?$/.test(first) ? Number(first.replace(/\$/g, "")) : NaN;
+  const mRisk = first && /^\d+(?:[.,]\d+)?\$?$/.test(first) ? parseNumberToken(first.replace(/\$/g, "")) : NaN;
   if (Number.isFinite(mRisk)) {
     riskOverride = Number(mRisk);
     idx = 1;
@@ -172,9 +179,9 @@ export function parseLine(line: string): ParsedCmd | null {
     const rawTicker = p[3];
     const legs: TradeLeg[] = [];
     let i = 4;
-    while (i + 1 < p.length && isFinite(Number(p[i])) && isFinite(Number(p[i + 1]))) {
-      const usd = Number(p[i]);
-      const price = Number(p[i + 1]);
+    while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && Number.isFinite(parseNumberToken(p[i + 1]))) {
+      const usd = parseHumanUsd(p[i]);
+      const price = parseNumberToken(p[i + 1]);
       if (usd > 0 && price > 0) legs.push({ usd, price });
       i += 2;
     }
@@ -189,7 +196,7 @@ export function parseLine(line: string): ParsedCmd | null {
   if (!rawTicker) return null;
 
   // MARKET-вход краткий: l <sym> <usd> [preset|-]
-  if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || isNaN(Number(p[idx+3])))) {
+  if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || Number.isNaN(parseNumberToken(p[idx+3])))) {
     const usd = parseHumanUsd(p[idx+2]);
     const presetArg = p[idx+3] || DEFAULT_PRESET;
     const noPreset = presetArg === "-" || presetArg === "—"; // дефис или тире
@@ -209,9 +216,9 @@ export function parseLine(line: string): ParsedCmd | null {
 
   const legs: TradeLeg[] = [];
   let i = idx+2;
-  while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && isFinite(Number(p[i + 1]))) {
+  while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && Number.isFinite(parseNumberToken(p[i + 1]))) {
     const usd = parseHumanUsd(p[i]);
-    const price = Number(p[i + 1]);
+    const price = parseNumberToken(p[i + 1]);
     if (usd > 0 && price > 0) legs.push({ usd, price });
     i += 2;
   }
