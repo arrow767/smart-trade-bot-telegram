@@ -6,7 +6,7 @@ import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "../core/engine"
 import { banner, formatTradeNotification } from "../core/format";
 import { startTaskRecoveryLoop } from "../core/recovery";
 import { setDefaultResultOrder } from "dns";
-import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetName, setDefaultPreset } from "../config/trading_config";
+import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetNameBySide, setDefaultPresetBySide, setDefaultPreset } from "../config/trading_config";
 setDefaultResultOrder?.("ipv4first");  // принудительно IPv4 в Node
 
 
@@ -398,7 +398,8 @@ bot.action("PRESETS", async (ctx)=>{
     await ctx.answerCbQuery();
     
     const presets = await listPresets();
-    const defaultPreset = await getDefaultPresetName();
+    const defaultLong = await getDefaultPresetNameBySide("long");
+    const defaultShort = await getDefaultPresetNameBySide("short");
     
     if (!presets.length) {
       await ctx.reply(
@@ -409,18 +410,18 @@ bot.action("PRESETS", async (ctx)=>{
     }
     
     // Кнопки для каждого пресета
-    const buttons = presets.map(p => [
-      Markup.button.callback(
-        `${p.config_name === defaultPreset ? "⭐ " : ""}${p.config_name}`,
-        `PRESET_SHOW|${p.config_name}`
-      )
-    ]);
+    const buttons = presets.map(p => {
+      const isL = p.config_name === defaultLong;
+      const isS = p.config_name === defaultShort;
+      const tag = isL && isS ? "⭐LS " : isL ? "⭐L " : isS ? "⭐S " : "";
+      return [Markup.button.callback(`${tag}${p.config_name}`, `PRESET_SHOW|${p.config_name}`)];
+    });
     
     buttons.push([Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]);
     buttons.push([Markup.button.callback("« Назад", "BACK_MAIN")]);
     
     await ctx.reply(
-      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐ - default пресет`,
+      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐L - default для long\n⭐S - default для short`,
       { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) }
     );
   } catch (e:any) {
@@ -435,7 +436,8 @@ bot.hears("⚙️ Presets", async (ctx)=>{
     if (!isAllowed(ctx)) return deny(ctx);
     
     const presets = await listPresets();
-    const defaultPreset = await getDefaultPresetName();
+    const defaultLong = await getDefaultPresetNameBySide("long");
+    const defaultShort = await getDefaultPresetNameBySide("short");
     
     if (!presets.length) {
       await ctx.reply(
@@ -445,17 +447,17 @@ bot.hears("⚙️ Presets", async (ctx)=>{
       return;
     }
     
-    const buttons = presets.map(p => [
-      Markup.button.callback(
-        `${p.config_name === defaultPreset ? "⭐ " : ""}${p.config_name}`,
-        `PRESET_SHOW|${p.config_name}`
-      )
-    ]);
+    const buttons = presets.map(p => {
+      const isL = p.config_name === defaultLong;
+      const isS = p.config_name === defaultShort;
+      const tag = isL && isS ? "⭐LS " : isL ? "⭐L " : isS ? "⭐S " : "";
+      return [Markup.button.callback(`${tag}${p.config_name}`, `PRESET_SHOW|${p.config_name}`)];
+    });
     
     buttons.push([Markup.button.callback("➕ Добавить пресет", "PRESET_ADD")]);
     
     await ctx.reply(
-      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐ - default пресет`,
+      `<b>⚙️ Пресеты</b>\n\nВыберите пресет для просмотра/редактирования:\n⭐L - default для long\n⭐S - default для short`,
       { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) }
     );
   } catch (e:any) {
@@ -471,12 +473,15 @@ bot.action(/PRESET_SHOW\|(.+)/, async (ctx)=>{
     
     const name = ctx.match![1];
     const preset = await getPreset(name);
-    const defaultPreset = await getDefaultPresetName();
-    const isDefault = name === defaultPreset;
+    const defaultLong = await getDefaultPresetNameBySide("long");
+    const defaultShort = await getDefaultPresetNameBySide("short");
+    const isDefaultLong = name === defaultLong;
+    const isDefaultShort = name === defaultShort;
     
     const text = [
       `<b>⚙️ Пресет: ${name}</b>`,
-      isDefault ? `<b>⭐ Default</b>` : "",
+      isDefaultLong ? `<b>⭐ Default Long</b>` : "",
+      isDefaultShort ? `<b>⭐ Default Short</b>` : "",
       ``,
       `<b>Риск:</b> $${preset.trade_risk}`,
       `<b>Take Profit:</b> ${preset.take_profit.join(", ")}`,
@@ -487,11 +492,8 @@ bot.action(/PRESET_SHOW\|(.+)/, async (ctx)=>{
       [Markup.button.callback(`📝 Риск ($${preset.trade_risk})`, `PRESET_EDIT|${name}|risk`)],
       [Markup.button.callback(`📝 TP (${preset.take_profit.join(",")})`, `PRESET_EDIT|${name}|tp`)],
       [Markup.button.callback(`📝 Ratio (${preset.take_profit_ratio.join(",")})`, `PRESET_EDIT|${name}|ratio`)],
-      [
-        isDefault 
-          ? Markup.button.callback("⭐ Default", "NOOP")
-          : Markup.button.callback("⭐ Сделать default", `PRESET_DEFAULT|${name}`)
-      ],
+      [Markup.button.callback(isDefaultLong ? "⭐ Default Long" : "⭐ Сделать Default Long", isDefaultLong ? "NOOP" : `PRESET_DEFAULT|long|${name}`)],
+      [Markup.button.callback(isDefaultShort ? "⭐ Default Short" : "⭐ Сделать Default Short", isDefaultShort ? "NOOP" : `PRESET_DEFAULT|short|${name}`)],
       [
         Markup.button.callback("🗑 Удалить", `PRESET_DELETE|${name}`),
         Markup.button.callback("« Назад", "PRESETS")
@@ -535,18 +537,31 @@ bot.action(/PRESET_EDIT\|(.+)\|(.+)/, async (ctx)=>{
   }
 });
 
-// PRESET_DEFAULT: сделать пресет default
+// PRESET_DEFAULT: сделать пресет default (long/short) + legacy
 bot.action(/PRESET_DEFAULT\|(.+)/, async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await ctx.answerCbQuery("Установлен default");
+    await ctx.answerCbQuery("Ок");
     
-    const name = ctx.match![1];
+    const payload = String(ctx.match![1] || "");
+    const parts = payload.split("|");
+    if (parts.length >= 2 && (parts[0] === "long" || parts[0] === "short")) {
+      const side = parts[0] as "long" | "short";
+      const name = parts.slice(1).join("|");
+      await setDefaultPresetBySide(side, name);
+      await ctx.reply(
+        `✅ Пресет <b>${escapeHtml(name)}</b> установлен как default для <b>${side === "long" ? "long" : "short"}</b>`,
+        { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« К пресетам", "PRESETS")]]) }
+      );
+      return;
+    }
+    // legacy: ставим на обе стороны
+    const name = payload;
     await setDefaultPreset(name);
     
     // Перезагрузить view
     await ctx.reply(
-      `✅ Пресет <b>${name}</b> установлен как default`,
+      `✅ Пресет <b>${escapeHtml(name)}</b> установлен как default (long+short)`,
       { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("« К пресетам", "PRESETS")]]) }
     );
   } catch (e:any) {
@@ -865,7 +880,9 @@ bot.on("text", async (ctx)=>{
     // ✅ НОВОЕ: Отправка уведомления о сделке перед выполнением
     if (parsed.kind === "trade" && ENABLE_TRADE_NOTIFICATIONS) {
       try {
-        const preset = await getPreset(parsed.presetName);
+        const side = parsed.dir === "l" ? "long" : "short";
+        const presetNameEffective = (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : parsed.presetName;
+        const preset = await getPreset(presetNameEffective);
         const riskUsd = Number.isFinite(parsed.riskUsdOverride) && (parsed.riskUsdOverride as number) > 0 ? (parsed.riskUsdOverride as number) : preset.trade_risk;
         
         let legs: Array<{ usd: number; price: number; type: "LIMIT"|"STOP"|"MARKET" }> = [];
@@ -894,12 +911,12 @@ bot.on("text", async (ctx)=>{
         
         const notification = formatTradeNotification({
           ticker: parsed.rawTicker,
-          side: parsed.dir === "l" ? "long" : "short",
+          side,
           riskUsd,
           legs,
           takes: preset.take_profit,
           takesRatio: preset.take_profit_ratio,
-          preset: parsed.presetName,
+          preset: presetNameEffective,
           market: !!parsed.market,
           noPreset: parsed.noPreset || false, // ✅ НОВОЕ: передаём флаг noPreset
         });
