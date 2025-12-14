@@ -20,7 +20,7 @@ function hasClosePositionSL(orders: any[]): boolean {
 
 function hasAnyReduceOnlyTP(orders: any[]): boolean {
   for (const o of orders) {
-    const t = String(o?.type || "").toUpperCase();
+    const t = String(o?.type || o?.strategyType || "").toUpperCase();
     const isLimit = t.includes("LIMIT") && !t.includes("STOP");
     const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
     const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
@@ -64,7 +64,7 @@ async function ensureBracketsForTask(
   const all = [...open, ...algo];
 
   const hasSL = hasClosePositionSL(all);
-  const hasTP = hasAnyReduceOnlyTP(open);
+  const hasTP = hasAnyReduceOnlyTP(all); // ✅ FIX: проверяем все ордера, не только open
 
   if (hasSL && hasTP) return;
 

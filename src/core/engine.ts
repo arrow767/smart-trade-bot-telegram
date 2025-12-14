@@ -250,30 +250,43 @@ export async function runCommand(
     const id = parsed.id;
     const symbols = await collectSymbolsForOrders(ex, book);
     let ok = false;
+    let foundSymbol = "";
     
     // Сначала пробуем отменить как обычный ордер
     for (const sym of symbols) {
       try {
-        await ex.cancelOrder(sym, id);
-        ok = true;
-        info(mode === "console" ? `Снял ордер ${id} (${sym}).` : `<b>Снял ордер</b> <code>${id}</code> для <code>${sym}</code>.`);
-        break;
+        // Проверяем, есть ли ордер с таким ID для этого символа
+        const orders = (await ex.fetchOpenOrders(sym)) as any[];
+        const found = orders.find((o: any) => String(o.id) === id || String(o.info?.orderId) === id);
+        if (found) {
+          await ex.cancelOrder(sym, id);
+          ok = true;
+          foundSymbol = sym;
+          break;
+        }
       } catch {}
     }
     
-    // ✅ НОВОЕ: Если не нашли обычный ордер - пробуем отменить как Algo Order
+    // ✅ Если не нашли обычный ордер - ищем среди Algo Orders (без фильтра по символу)
     if (!ok) {
-      for (const sym of symbols) {
-        try {
-          await ex.cancelAlgoOrder(sym, id);
+      try {
+        const allAlgoOrders = await ex.fetchOpenAlgoOrders(); // все Algo Orders
+        const algoOrder = allAlgoOrders.find((ao: any) => 
+          String(ao.algoId) === id || String(ao.orderId) === id
+        );
+        if (algoOrder) {
+          // Конвертируем символ из Binance формата (например "PIEVERSE") в CCXT формат
+          const rawSym = algoOrder.symbol || "";
+          foundSymbol = rawSym.endsWith("USDT") ? `${rawSym.replace("USDT", "")}/USDT:USDT` : rawSym;
+          await ex.cancelAlgoOrder(foundSymbol, id);
           ok = true;
-          info(mode === "console" ? `Снял Algo ордер ${id} (${sym}).` : `<b>Снял Algo ордер</b> <code>${id}</code> для <code>${sym}</code>.`);
-          break;
-        } catch {}
-      }
+        }
+      } catch {}
     }
     
-    if (!ok) {
+    if (ok && foundSymbol) {
+      info(mode === "console" ? `Снял ордер ${id} (${foundSymbol}).` : `<b>Снял ордер</b> <code>${id}</code> для <code>${foundSymbol}</code>.`);
+    } else {
       info(mode === "console" ? `Ордер ${id} не найден (или уже снят).` : `<b>Ордер не найден</b>: <code>${id}</code>.`);
     }
     return;

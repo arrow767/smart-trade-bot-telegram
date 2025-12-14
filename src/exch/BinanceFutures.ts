@@ -161,39 +161,57 @@ export class BinanceFutures {
   }
 
   // ====== ДОБАВЛЕНО: жёсткая синхронизация со временем Binance ======
+  private lastSyncErrorTs = 0; // для throttle ошибок
+  
   private async syncServerTime(force = false) {
     const now = Date.now();
     if (!force && now - this.lastSyncTs < this.SYNC_TTL) return;
 
-    try {
-      // Прямой вызов публичного endpoint без ccxt (чтобы избежать цикла с -1021)
-      const response = await fetch("https://fapi.binance.com/fapi/v1/time");
-      if (!response.ok) {
-        console.warn(`⚠️ Failed to sync time: HTTP ${response.status}`);
-        return;
-      }
-      const data = await response.json();
-      const serverTs = Number(data?.serverTime ?? 0);
-      const localTs = Date.now();
+    // Список endpoints для fallback
+    const endpoints = [
+      "https://fapi.binance.com/fapi/v1/time",
+      "https://api.binance.com/api/v3/time", // spot API как fallback
+    ];
+    
+    let success = false;
+    for (const url of endpoints) {
+      try {
+        // AbortController для timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+        
+        if (!response.ok) continue;
+        
+        const data = await response.json();
+        const serverTs = Number(data?.serverTime ?? 0);
+        const localTs = Date.now();
 
-      if (Number.isFinite(serverTs) && serverTs > 0) {
-        // Разница: server - local
-        // Если положительная — локальные часы отстают, если отрицательная — спешат
-        const diff = serverTs - localTs;
-        this.timeSkewMs = -diff; // храним как local - server для удобства
-        
-        // CCXT добавляет timeDifference к локальному timestamp при запросе
-        // Если local спешит на 5000ms, нужно вычесть 5000 → timeDifference = -5000
-        (this.fapi as any).timeDifference = diff;
-        
-        // Логируем только при большой разнице или принудительной синхронизации
-        if (force || Math.abs(diff) > 1000) {
-          console.log(`⏱️ Time sync: diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
+        if (Number.isFinite(serverTs) && serverTs > 0) {
+          const diff = serverTs - localTs;
+          this.timeSkewMs = -diff;
+          (this.fapi as any).timeDifference = diff;
+          
+          if (force || Math.abs(diff) > 1000) {
+            console.log(`⏱️ Time sync: diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
+          }
+          success = true;
+          this.lastSyncErrorTs = 0; // сброс при успехе
+          break;
         }
+      } catch {
+        // пробуем следующий endpoint
       }
-    } catch (err: any) {
-      console.warn(`⚠️ syncServerTime error:`, err?.message || err);
     }
+    
+    // Логируем ошибку только раз в 60 секунд чтобы не спамить
+    if (!success && (now - this.lastSyncErrorTs > 60_000)) {
+      console.warn(`⚠️ syncServerTime: не удалось синхронизировать время (проверьте сеть/VPN)`);
+      this.lastSyncErrorTs = now;
+    }
+    
     this.lastSyncTs = now;
   }
 
@@ -611,9 +629,16 @@ export class BinanceFutures {
    * ✅ Отмена Algo Order по algoId
    */
   async cancelAlgoOrder(symbol: string, algoId: string): Promise<any> {
-    const m: any = this.fapi.market(symbol);
+    let symId: string;
+    try {
+      const m: any = this.fapi.market(symbol);
+      symId = m.id;
+    } catch {
+      const cleaned = symbol.replace("/USDT:USDT", "").replace("/USDT", "").replace(":USDT", "");
+      symId = cleaned + "USDT";
+    }
     return this.withRetry(() => this.algoOrderRequest("DELETE", "/fapi/v1/algoOrder", {
-      symbol: m.id,
+      symbol: symId,
       algoId,
     }));
   }
@@ -622,9 +647,16 @@ export class BinanceFutures {
    * ✅ Отмена всех открытых Algo Orders для символа
    */
   async cancelAllAlgoOrders(symbol: string): Promise<any> {
-    const m: any = this.fapi.market(symbol);
+    let symId: string;
+    try {
+      const m: any = this.fapi.market(symbol);
+      symId = m.id;
+    } catch {
+      const cleaned = symbol.replace("/USDT:USDT", "").replace("/USDT", "").replace(":USDT", "");
+      symId = cleaned + "USDT";
+    }
     return this.withRetry(() => this.algoOrderRequest("DELETE", "/fapi/v1/algoOpenOrders", {
-      symbol: m.id,
+      symbol: symId,
     }));
   }
   
@@ -634,8 +666,15 @@ export class BinanceFutures {
   async fetchOpenAlgoOrders(symbol?: string): Promise<any[]> {
     const params: Record<string, any> = {};
     if (symbol) {
-      const m: any = this.fapi.market(symbol);
-      params.symbol = m.id;
+      try {
+        const m: any = this.fapi.market(symbol);
+        params.symbol = m.id;
+      } catch {
+        // Если символ не найден в markets, пробуем конвертировать вручную
+        // PIEVERSE/USDT:USDT -> PIEVERSUSDT
+        const cleaned = symbol.replace("/USDT:USDT", "").replace("/USDT", "").replace(":USDT", "");
+        params.symbol = cleaned + "USDT";
+      }
     }
     const result = await this.withRetry(() => this.algoOrderRequest("GET", "/fapi/v1/openAlgoOrders", params));
     return Array.isArray(result?.orders) ? result.orders : (Array.isArray(result) ? result : []);
