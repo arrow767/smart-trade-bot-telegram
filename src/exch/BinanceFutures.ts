@@ -1,47 +1,36 @@
 import ccxt from "ccxt";
 import crypto from "crypto";
-import https from "https";
+import { request, Agent } from "undici";
 
-// ====== Надёжный HTTP клиент (вместо нестабильного native fetch) ======
-function httpsRequest(
+// ====== Undici HTTP клиент (надёжнее native fetch и https модуля) ======
+const httpAgent = new Agent({
+  connect: { timeout: 10_000 },
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+});
+
+async function httpRequest(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string; timeout?: number }
 ): Promise<{ status: number; data: any }> {
-  return new Promise((resolve, reject) => {
-    const urlObj = new URL(url);
-    const reqOptions: https.RequestOptions = {
-      hostname: urlObj.hostname,
-      port: 443,
-      path: urlObj.pathname + urlObj.search,
-      method: options.method || "GET",
-      headers: options.headers || {},
-      timeout: options.timeout || 10000,
-    };
-
-    const req = https.request(reqOptions, (res) => {
-      let data = "";
-      res.on("data", (chunk) => (data += chunk));
-      res.on("end", () => {
-        try {
-          const parsed = JSON.parse(data);
-          resolve({ status: res.statusCode || 0, data: parsed });
-        } catch {
-          resolve({ status: res.statusCode || 0, data: data });
-        }
-      });
-    });
-
-    req.on("error", reject);
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error("Request timeout"));
-    });
-
-    if (options.body) {
-      req.write(options.body);
-    }
-    req.end();
+  const { statusCode, body } = await request(url, {
+    method: (options.method || "GET") as any,
+    headers: options.headers,
+    body: options.body,
+    dispatcher: httpAgent,
+    headersTimeout: options.timeout || 10_000,
+    bodyTimeout: options.timeout || 10_000,
   });
+  
+  const text = await body.text();
+  let data: any;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = text;
+  }
+  
+  return { status: statusCode, data };
 }
 
 export type SymbolFilters = {
@@ -219,7 +208,7 @@ export class BinanceFutures {
     let success = false;
     for (const url of endpoints) {
       try {
-        const { status, data } = await httpsRequest(url, { method: "GET", timeout: 5000 });
+        const { status, data } = await httpRequest(url, { method: "GET", timeout: 5000 });
         if (status !== 200) continue;
         
         const serverTs = Number(data?.serverTime ?? 0);
@@ -585,7 +574,7 @@ export class BinanceFutures {
       url = `${this.ALGO_ORDER_BASE_URL}${endpoint}?${queryString}&signature=${signature}`;
     }
     
-    const { status, data } = await httpsRequest(url, {
+    const { status, data } = await httpRequest(url, {
       method,
       headers: {
         "X-MBX-APIKEY": this.apiKey!,
