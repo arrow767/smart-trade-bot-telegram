@@ -1290,24 +1290,63 @@ export async function runCommand(
           });
           const noOtherOpenOrders = otherOpenOrders.length === 0;
           
-          // ✅ МАКСИМАЛЬНО ПРОСТАЯ ПРОВЕРКА:
+          // ✅ ПРОВЕРКА 2A: Entry ордера сняты вручную
           // 1. Позиция пустая (flat)
-          // 2. Все ордера исчезли из списка открытых (allOrdersGone)
-          // 3. Прошло минимум 3 секунды после создания задачи (защита от race condition)
-          // 4. Ордера были видны хотя бы раз (ordersEverSeen) - защита от ложных срабатываний
-          // 5. ⚠️ КРИТИЧНО: Algo Orders были успешно получены (не было ошибки)
-          // 6. ⚠️ КРИТИЧНО: На символе нет других ордеров (SL/TP/прочие) кроме входных этой задачи
-          const canRemove = flat && entryIds.length > 0 && 
+          // 2. Все entry ордера исчезли (allOrdersGone)
+          // 3. Прошло минимум 3 секунды
+          // 4. Ордера были видны хотя бы раз
+          // 5. Algo Orders получены успешно
+          // 6. На символе нет других ордеров
+          const canRemoveByEntryGone = flat && entryIds.length > 0 && 
             allOrdersGone && timeSinceCreated >= 3000 && ordersEverSeen && !algoOrdersFetchFailed && noOtherOpenOrders;
           
-          if (mode === "console" && entryIds.length > 0) {
-            console.log(`[DEBUG] Manual cancellation check: flat=${flat}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, noOtherOpenOrders=${noOtherOpenOrders}, canRemove=${canRemove}`);
+          // ✅ ПРОВЕРКА 2B: Позиция закрыта (TP/SL или вручную), все ордера сняты
+          // Если позиции нет и вообще никаких ордеров на символе нет — задача завершена
+          const totalOrdersOnSymbol = allOpenOrders.length;
+          const canRemoveByAllClear = flat && totalOrdersOnSymbol === 0 && 
+            timeSinceCreated >= 5000 && !algoOrdersFetchFailed;
+          
+          const canRemove = canRemoveByEntryGone || canRemoveByAllClear;
+          
+          if (mode === "console") {
+            console.log(`[DEBUG] Task removal check: flat=${flat}, totalOrders=${totalOrdersOnSymbol}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, canRemoveByEntryGone=${canRemoveByEntryGone}, canRemoveByAllClear=${canRemoveByAllClear}`);
           }
           
           if (canRemove) {
+            // ✅ ДВОЙНАЯ ПРОВЕРКА перед удалением
+            await new Promise(r => setTimeout(r, 1500));
+            
+            // Перепроверяем позицию
+            const recheck1 = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 999));
+            let recheck2 = 999;
+            try {
+              const allPos = await ex.fetchAllOpenPositions();
+              const myPos = allPos.find((p: any) => p.symbol === symbolCcxt);
+              recheck2 = Math.abs(myPos?.contracts ?? 0);
+            } catch {}
+            
+            // Перепроверяем ордера
+            let recheckOrders = 999;
+            try {
+              const o1 = (await ex.fetchOpenOrders(symbolCcxt) as any[]).length;
+              const o2 = (await ex.fetchOpenAlgoOrders(symbolCcxt)).length;
+              recheckOrders = o1 + o2;
+            } catch {}
+            
+            const stillClear = recheck1 < minQty * 0.5 && recheck2 < minQty * 0.5 && recheckOrders === 0;
+            
+            if (mode === "console") {
+              console.log(`[DEBUG] Task removal double-check: recheck1=${recheck1}, recheck2=${recheck2}, recheckOrders=${recheckOrders}, stillClear=${stillClear}`);
+            }
+            
+            if (!stillClear) {
+              // Не прошла двойная проверка - пропускаем
+              continue;
+            }
+            
             // Логируем для отладки
             if (mode === "console") {
-              console.log(`[DEBUG] ✅ MANUAL CANCELLATION DETECTED: taskId=${task.id}, symbol=${symbolCcxt}, removing task...`);
+              console.log(`[DEBUG] ✅ TASK REMOVAL CONFIRMED: taskId=${task.id}, symbol=${symbolCcxt}, removing...`);
             }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
@@ -1324,10 +1363,13 @@ export async function runCommand(
             if (!otherHasActiveEntries) {
               // Только если у других задач тоже нет активных входов — удаляем
               book.remove(task.id);
+              const reason = canRemoveByAllClear 
+                ? "позиция закрыта, ордеров нет" 
+                : "все входные заявки сняты";
               info(
                 mode === "console"
-                  ? `🧹 Все входные заявки сняты вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
-                  : `<b>🧹 Все входные заявки сняты вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
+                  ? `🧹 Задачу #${task.id} по ${symbolCcxt} удалил (${reason}).`
+                  : `<b>🧹 Задачу #${task.id}</b> по <code>${symbolCcxt}</code> удалил (${reason}).`
               );
               return;
             }
