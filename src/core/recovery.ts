@@ -172,6 +172,19 @@ export function startTaskRecoveryLoop(
           continue;
         }
 
+        // ✅ ДВОЙНАЯ ПРОВЕРКА: подтверждаем что позиции нет через другой метод
+        let posCheck2 = 999;
+        try {
+          posCheck2 = Math.abs(await ex.fetchPositionSize(symbol));
+        } catch {}
+        const filters = ex.getSymbolFilters(symbol);
+        const minQty = filters?.minQty || 0;
+        if (posCheck2 > minQty * 0.5) {
+          // Позиция на самом деле есть — fetchAllOpenPositions врёт или устарел
+          emptySinceBySymbol.delete(symbol);
+          continue;
+        }
+
         // 2) Если позиции нет — проверяем "висячие" tasks (нет ордеров вообще) с grace-time
         if (!orphanEnabled) {
           emptySinceBySymbol.delete(symbol);

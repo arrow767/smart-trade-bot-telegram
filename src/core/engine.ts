@@ -915,16 +915,38 @@ export async function runCommand(
           }
 
           const f = ex.getSymbolFilters(symbolCcxt);
-          const flat = Math.abs(await ex.fetchPositionSize(symbolCcxt)) < Math.max((f.minQty||0)*0.5, 1e-12);
-          if (flat) {
-            // позиция вручную закрыта или сработал SL — чистим ордера и удаляем задачу
-            await ex.cancelAllOrders(symbolCcxt).catch(() => {});
-            const markNow = Number((await ex.fetchTicker(symbolCcxt)).last ?? 0);
-            const wasSL = slPxCurrent && ((side === "long" && markNow <= (slPxCurrent + (f.tickSize||0))) || (side === "short" && markNow >= (slPxCurrent - (f.tickSize||0))));
-            info(mode === "console" ? (wasSL ? `SL сработал по ${symbolCcxt}. Задачу #${task.id} удалил.` : `Позиция ${symbolCcxt} закрыта. Задачу #${task.id} удалил.`)
-              : (wasSL ? `<b>SL сработал</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.` : `<b>Позиция закрыта</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.`));
-            book.remove(task.id);
-            break;
+          const minQ = Math.max((f.minQty||0)*0.5, 1e-12);
+          const posCheck1 = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 999));
+          const flat1 = posCheck1 < minQ;
+          
+          if (flat1) {
+            // ✅ ДВОЙНАЯ ПРОВЕРКА: подождать и проверить ещё раз разными методами
+            await new Promise(r => setTimeout(r, 1500));
+            
+            const posCheck2 = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 999));
+            let posCheck3 = 999;
+            try {
+              const allPos = await ex.fetchAllOpenPositions();
+              const myPos = allPos.find((p: any) => p.symbol === symbolCcxt);
+              posCheck3 = Math.abs(myPos?.contracts ?? 0);
+            } catch {}
+            
+            const stillFlat = posCheck2 < minQ && posCheck3 < minQ;
+            
+            if (mode === "console") {
+              console.log(`[DEBUG] Market flat double-check: posCheck2=${posCheck2}, posCheck3=${posCheck3}, stillFlat=${stillFlat}`);
+            }
+            
+            if (stillFlat) {
+              // позиция вручную закрыта или сработал SL — чистим ордера и удаляем задачу
+              await ex.cancelAllOrders(symbolCcxt).catch(() => {});
+              const markNow = Number((await ex.fetchTicker(symbolCcxt)).last ?? 0);
+              const wasSL = slPxCurrent && ((side === "long" && markNow <= (slPxCurrent + (f.tickSize||0))) || (side === "short" && markNow >= (slPxCurrent - (f.tickSize||0))));
+              info(mode === "console" ? (wasSL ? `SL сработал по ${symbolCcxt}. Задачу #${task.id} удалил.` : `Позиция ${symbolCcxt} закрыта. Задачу #${task.id} удалил.`)
+                : (wasSL ? `<b>SL сработал</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.` : `<b>Позиция закрыта</b> по <code>${symbolCcxt}</code>. Задачу #${task.id} удалил.`));
+              book.remove(task.id);
+              break;
+            }
           }
 
           await new Promise((r) => setTimeout(r, 1000));
@@ -1195,27 +1217,52 @@ export async function runCommand(
         const minQty = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const flat = posSize < Math.max(minQty * 0.5, 1e-12);
         const wasInPosition = lastSize > minQty * 0.5;
-        const taskAge = Date.now() - TASK_CREATED_AT; // Возраст задачи в миллисекундах
-        const manuallyClosed = wasInPosition && flat && taskAge >= 2000; // Минимум 2 секунды для защиты
+        const taskAge = Date.now() - TASK_CREATED_AT;
+        
+        // ✅ УЛУЧШЕНО: Также считаем "была позиция" если task.status === "live"
+        const taskStatus = book.get(task.id)?.status;
+        const taskWasLive = taskStatus === "live" || taskStatus === "filled";
+        const hadPosition = wasInPosition || taskWasLive;
+        
+        // Если позиция была (по lastSize или по статусу task) и сейчас flat
+        const manuallyClosed = hadPosition && flat && taskAge >= 2000;
         
         if (manuallyClosed) {
-          // Позиция была закрыта вручную - отменяем все ордера и удаляем задачу
-          await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
-          for (const id of keep) {
-            try {
-              await ex.cancelOrder(symbolCcxt, id).catch(() => {});
-            } catch {}
-            try {
-              await ex.cancelAlgoOrder(symbolCcxt, id).catch(() => {});
-            } catch {}
+          // ✅ ДВОЙНАЯ ПРОВЕРКА: подождать и проверить ещё раз разными методами
+          await new Promise(r => setTimeout(r, 1500));
+          
+          // Проверка 1: fetchPositionSize
+          const recheck1 = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
+          
+          // Проверка 2: fetchAllOpenPositions (другой API endpoint)
+          let recheck2 = 0;
+          try {
+            const allPos = await ex.fetchAllOpenPositions();
+            const myPos = allPos.find((p: any) => p.symbol === symbolCcxt);
+            recheck2 = Math.abs(myPos?.contracts ?? 0);
+          } catch {}
+          
+          const stillFlat = recheck1 < minQty * 0.5 && recheck2 < minQty * 0.5;
+          
+          if (mode === "console") {
+            console.log(`[DEBUG] Manual close double-check: recheck1=${recheck1}, recheck2=${recheck2}, stillFlat=${stillFlat}`);
           }
-          book.remove(task.id);
-          info(
-            mode === "console"
-              ? `🧹 Позиция закрыта вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
-              : `<b>🧹 Позиция закрыта вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
-          );
-          return;
+          
+          if (stillFlat) {
+            // Позиция точно закрыта - отменяем все ордера и удаляем задачу
+            await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
+            for (const id of keep) {
+              try { await ex.cancelOrder(symbolCcxt, id).catch(() => {}); } catch {}
+              try { await ex.cancelAlgoOrder(symbolCcxt, id).catch(() => {}); } catch {}
+            }
+            book.remove(task.id);
+            info(
+              mode === "console"
+                ? `🧹 Позиция закрыта вручную — задачу #${task.id} по ${symbolCcxt} удалил.`
+                : `<b>🧹 Позиция закрыта вручную</b> — задачу #${task.id} по <code>${symbolCcxt}</code> удалил.`
+            );
+            return;
+          }
         }
 
           // ✅ ПРОВЕРКА 2: Все входные ордера сняты вручную (позиции не было и нет)
