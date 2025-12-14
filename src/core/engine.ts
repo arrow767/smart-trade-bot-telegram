@@ -789,6 +789,7 @@ export async function runCommand(
         let lastAvg = 0;
         let tpsPlaced = false;
         let slPxCurrent: number | undefined;
+        let planSent = false; // ✅ Флаг: план уже отправлен
         const tpIndexById = new Map<string, number>();
 
         const hasClosePositionConditional = (orders: any[]) => {
@@ -895,11 +896,15 @@ export async function runCommand(
                 }
                 tpsPlaced = true;
 
-                info(formatPlan(mode, {
-                  entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
-                  sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
-                  tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
-                }));
+                // ✅ Отправляем план только один раз
+                if (!planSent) {
+                  info(formatPlan(mode, {
+                    entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                    sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
+                    tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
+                  }));
+                  planSent = true;
+                }
               }
             } else {
               // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
@@ -1081,6 +1086,7 @@ export async function runCommand(
       let lastAvg = 0;
       let tpsPlaced = false;
       let slPxCurrent: number | undefined;
+      let planSent = false; // ✅ Флаг: план уже отправлен в Telegram
       const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
 
         const hasClosePositionConditional = (orders: any[]) => {
@@ -1514,20 +1520,24 @@ export async function runCommand(
               }
             }
 
-            const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
-            const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset3 });
+            // ✅ Отправляем план только один раз
+            if (!planSent) {
+              const planningPreset3 = { ...presetForRisk, trade_risk: baseRisk } as any;
+              const re2 = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset3 });
 
-            info(
-              formatPlan(mode, {
-                entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
-                sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
-                tps: re2.tpPrices.map((p, i) => ({
-                  price: String(ex.priceToPrecision(symbolCcxt, p)),
-                  qty: 0,
-                  R: presetForRisk.take_profit[i],
-                })),
-              })
-            );
+              info(
+                formatPlan(mode, {
+                  entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                  sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
+                  tps: re2.tpPrices.map((p, i) => ({
+                    price: String(ex.priceToPrecision(symbolCcxt, p)),
+                    qty: 0,
+                    R: presetForRisk.take_profit[i],
+                  })),
+                })
+              );
+              planSent = true;
+            }
           } else {
             // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
             info(mode === "console" 
