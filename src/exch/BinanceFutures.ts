@@ -1,5 +1,48 @@
 import ccxt from "ccxt";
 import crypto from "crypto";
+import https from "https";
+
+// ====== Надёжный HTTP клиент (вместо нестабильного native fetch) ======
+function httpsRequest(
+  url: string,
+  options: { method?: string; headers?: Record<string, string>; body?: string; timeout?: number }
+): Promise<{ status: number; data: any }> {
+  return new Promise((resolve, reject) => {
+    const urlObj = new URL(url);
+    const reqOptions: https.RequestOptions = {
+      hostname: urlObj.hostname,
+      port: 443,
+      path: urlObj.pathname + urlObj.search,
+      method: options.method || "GET",
+      headers: options.headers || {},
+      timeout: options.timeout || 10000,
+    };
+
+    const req = https.request(reqOptions, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve({ status: res.statusCode || 0, data: parsed });
+        } catch {
+          resolve({ status: res.statusCode || 0, data: data });
+        }
+      });
+    });
+
+    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error("Request timeout"));
+    });
+
+    if (options.body) {
+      req.write(options.body);
+    }
+    req.end();
+  });
+}
 
 export type SymbolFilters = {
   minQty: number;
@@ -167,25 +210,18 @@ export class BinanceFutures {
     const now = Date.now();
     if (!force && now - this.lastSyncTs < this.SYNC_TTL) return;
 
-    // Список endpoints для fallback
+    // Список endpoints для fallback (используем https модуль вместо fetch)
     const endpoints = [
       "https://fapi.binance.com/fapi/v1/time",
-      "https://api.binance.com/api/v3/time", // spot API как fallback
+      "https://api.binance.com/api/v3/time",
     ];
     
     let success = false;
     for (const url of endpoints) {
       try {
-        // AbortController для timeout
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const { status, data } = await httpsRequest(url, { method: "GET", timeout: 5000 });
+        if (status !== 200) continue;
         
-        const response = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-        
-        if (!response.ok) continue;
-        
-        const data = await response.json();
         const serverTs = Number(data?.serverTime ?? 0);
         const localTs = Date.now();
 
@@ -198,7 +234,7 @@ export class BinanceFutures {
             console.log(`⏱️ Time sync: diff=${diff}ms (${diff > 0 ? 'local behind' : 'local ahead'})`);
           }
           success = true;
-          this.lastSyncErrorTs = 0; // сброс при успехе
+          this.lastSyncErrorTs = 0;
           break;
         }
       } catch {
@@ -504,6 +540,7 @@ export class BinanceFutures {
   /**
    * Базовый метод для вызова Algo Order API
    * ⚠️ Для POST параметры отправляются в body, для GET/DELETE в query string
+   * ✅ Использует https модуль вместо нестабильного native fetch
    */
   private async algoOrderRequest(
     method: "POST" | "DELETE" | "GET",
@@ -542,26 +579,23 @@ export class BinanceFutures {
     let body: string | undefined;
     
     if (method === "POST") {
-      // Для POST: параметры в body, signature добавляется в body
       url = `${this.ALGO_ORDER_BASE_URL}${endpoint}`;
       body = `${queryString}&signature=${signature}`;
     } else {
-      // Для GET/DELETE: параметры в query string
       url = `${this.ALGO_ORDER_BASE_URL}${endpoint}?${queryString}&signature=${signature}`;
     }
     
-    const response = await fetch(url, {
+    const { status, data } = await httpsRequest(url, {
       method,
       headers: {
         "X-MBX-APIKEY": this.apiKey!,
         "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: body,
+      body,
+      timeout: 15000,
     });
     
-    const data = await response.json();
-    
-    if (!response.ok) {
+    if (status < 200 || status >= 300) {
       const err = new Error(`Algo Order API error: ${JSON.stringify(data)}`);
       (err as any).code = data?.code;
       (err as any).msg = data?.msg;

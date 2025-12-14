@@ -1125,9 +1125,13 @@ export async function runCommand(
         let algoOrdersFetchFailed = false; // ⚠️ Флаг ошибки получения Algo Orders
         try {
           algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
-        } catch (e) {
+        } catch (e: any) {
           algoOrdersFetchFailed = true; // ⚠️ Не удалось получить Algo Orders
-          console.warn(`[WARN] Failed to fetch Algo Orders for ${symbolCcxt}: ${e}`);
+          // Не спамим ошибками fetch/network - логируем только раз
+          const msg = String(e?.message || e);
+          if (!/fetch|timeout|network/i.test(msg)) {
+            console.warn(`[WARN] Failed to fetch Algo Orders for ${symbolCcxt}: ${msg}`);
+          }
         }
         
         // Объединяем обычные и Algo ордера для проверки

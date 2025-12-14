@@ -132,8 +132,19 @@ export function startTaskRecoveryLoop(
       const tasks = book.list().filter((t) => t.status !== "done" && t.status !== "canceled");
       if (!tasks.length) return;
 
-      const positions = await ex.fetchAllOpenPositions().catch(() => []);
-      const posArr = Array.isArray(positions) ? positions : [];
+      // ✅ ИСПРАВЛЕНО: Отслеживаем если получение позиций провалилось
+      let positionsFetchFailed = false;
+      let positions: any[] = [];
+      try {
+        const result = await ex.fetchAllOpenPositions();
+        positions = Array.isArray(result) ? result : [];
+      } catch (e: any) {
+        positionsFetchFailed = true;
+        // Не логируем каждый раз, только если не связано с сетью
+        if (!/fetch|timeout|network/i.test(String(e?.message || ""))) {
+          console.warn(`[WARN] Recovery: fetchAllOpenPositions failed: ${e?.message}`);
+        }
+      }
 
       const bySymbol = new Map<string, Task[]>();
       for (const t of tasks) {
@@ -143,7 +154,7 @@ export function startTaskRecoveryLoop(
 
       for (const [symbol, ts] of bySymbol.entries()) {
         const now = Date.now();
-        const pos = posArr.find((p: any) => p.symbol === symbol);
+        const pos = positions.find((p: any) => p.symbol === symbol);
 
         // 1) Если есть позиция — обеспечиваем SL/TP для связанной задачи
         if (pos) {
@@ -152,6 +163,12 @@ export function startTaskRecoveryLoop(
           if (task) {
             await ensureBracketsForTask(ex, task, pos, log).catch(() => {});
           }
+          continue;
+        }
+
+        // ✅ ИСПРАВЛЕНО: Если не удалось получить позиции — не принимаем решений на удаление
+        if (positionsFetchFailed) {
+          emptySinceBySymbol.delete(symbol);
           continue;
         }
 
