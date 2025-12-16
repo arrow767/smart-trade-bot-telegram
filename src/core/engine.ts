@@ -907,11 +907,14 @@ export async function runCommand(
                 }
               }
             } else {
-              // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
-              info(mode === "console" 
-                ? `✅ MARKET вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
-                : `<b>✅ MARKET вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
-              );
+              // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе (один раз)
+              if (!planSent) {
+                info(mode === "console" 
+                  ? `✅ MARKET вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
+                  : `<b>✅ MARKET вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
+                );
+                planSent = true;
+              }
             }
 
             lastSize = posSize;
@@ -1539,11 +1542,14 @@ export async function runCommand(
               planSent = true;
             }
           } else {
-            // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе
-            info(mode === "console" 
-              ? `✅ Вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
-              : `<b>✅ Вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
-            );
+            // ✅ НОВОЕ: Если пресеты отключены - просто сообщаем об успешном входе (один раз)
+            if (!planSent) {
+              info(mode === "console" 
+                ? `✅ Вход выполнен без SL/TP: ~${fmtQty5(posSize)} @ ${entryAvg}` 
+                : `<b>✅ Вход выполнен без SL/TP:</b> ~${fmtQty5(posSize)} @ ${entryAvg}`
+              );
+              planSent = true;
+            }
           }
 
           lastSize = posSize;

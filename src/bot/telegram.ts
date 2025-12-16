@@ -61,13 +61,51 @@ const bot = agent
       }
     });
 
-// ✅ НОВОЕ: Утилита для безопасной отправки сообщений с retry
+// ✅ Дедупликация сообщений — предотвращаем спам одинаковых сообщений
+const DEDUP_WINDOW_MS = 5000; // окно дедупликации: 5 секунд
+const DEDUP_MAX_ENTRIES = 100; // максимум записей в кэше
+const recentMessages = new Map<string, number>(); // hash → timestamp
+
+function getMessageHash(chatId: number | string, text: string): string {
+  // Простой хэш: chatId + первые 200 символов текста (без timestamp/динамических частей)
+  const normalized = text.slice(0, 200).replace(/\d+\.\d+/g, "N"); // заменяем числа на N для лучшей дедупликации
+  return `${chatId}:${normalized}`;
+}
+
+function isDuplicate(chatId: number | string, text: string): boolean {
+  const now = Date.now();
+  const hash = getMessageHash(chatId, text);
+  const lastSent = recentMessages.get(hash);
+  
+  if (lastSent && now - lastSent < DEDUP_WINDOW_MS) {
+    return true; // дубликат
+  }
+  
+  // Очистка старых записей
+  if (recentMessages.size > DEDUP_MAX_ENTRIES) {
+    for (const [k, v] of recentMessages) {
+      if (now - v > DEDUP_WINDOW_MS * 2) recentMessages.delete(k);
+    }
+  }
+  
+  recentMessages.set(hash, now);
+  return false;
+}
+
+// ✅ НОВОЕ: Утилита для безопасной отправки сообщений с retry и дедупликацией
 async function safeReply(
   ctx: any,
   text: string,
   options?: any,
   retries = TELEGRAM_RETRY_TRIES
 ): Promise<any> {
+  // ✅ Дедупликация: пропускаем если сообщение уже отправлено недавно
+  const chatId = ctx?.chat?.id || ctx?.from?.id || "unknown";
+  if (isDuplicate(chatId, text)) {
+    console.log(`[DEDUP] Skipping duplicate message to ${chatId}: ${text.slice(0, 50)}...`);
+    return null;
+  }
+  
   let lastError: any;
   
   for (let i = 0; i < retries; i++) {
