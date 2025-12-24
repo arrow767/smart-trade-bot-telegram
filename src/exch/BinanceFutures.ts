@@ -71,6 +71,12 @@ function isTimeoutOrUnknown(e: any): boolean {
   // ✅ ДОБАВЛЕНО: разные формулировки "unknown error" от Binance
   if (/unknown error/i.test(msg + binanceMsg + desc)) return true;
 
+  // ✅ ДОБАВЛЕНО: Premature close - соединение закрыто до получения полного ответа
+  if (/premature close|connection (closed|reset)|ECONNRESET|socket hang up/i.test(msg + desc + binanceMsg)) return true;
+
+  // ✅ ДОБАВЛЕНО: Invalid response body - часто связано с разрывом соединения
+  if (/invalid response body/i.test(msg + desc + binanceMsg)) return true;
+
   return false;
 }
 
@@ -621,8 +627,16 @@ export class BinanceFutures {
       type: params.type,
       triggerPrice: this.fapi.priceToPrecision(params.symbol, params.stopPrice), // используем triggerPrice вместо stopPrice
       workingType: params.workingType || "CONTRACT_PRICE",
-      timeInForce: "GTC",
     };
+    
+    // ✅ ИСПРАВЛЕНО: timeInForce нужен ТОЛЬКО для LIMIT ордеров, не для STOP_MARKET
+    // Ошибка -4509 "Time in Force (TIF) GTE can only be..." возникала из-за этого
+    if (params.type === "STOP" || params.type === "TAKE_PROFIT") {
+      // Только для LIMIT-типа ордеров (STOP/TAKE_PROFIT с price) нужен timeInForce
+      if (params.price !== undefined) {
+        apiParams.timeInForce = "GTC";
+      }
+    }
     
     if (params.quantity !== undefined) {
       apiParams.quantity = this.fapi.amountToPrecision(params.symbol, params.quantity);

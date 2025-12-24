@@ -62,13 +62,15 @@ const bot = agent
     });
 
 // ✅ Дедупликация сообщений — предотвращаем спам одинаковых сообщений
-const DEDUP_WINDOW_MS = 5000; // окно дедупликации: 5 секунд
-const DEDUP_MAX_ENTRIES = 100; // максимум записей в кэше
+// ✅ УВЕЛИЧЕНО: окно 30 секунд для защиты от спама в цикле трекинга (каждые 2.5 сек)
+const DEDUP_WINDOW_MS = 30_000; // окно дедупликации: 30 секунд
+const DEDUP_MAX_ENTRIES = 200; // максимум записей в кэше
 const recentMessages = new Map<string, number>(); // hash → timestamp
 
 function getMessageHash(chatId: number | string, text: string): string {
   // Простой хэш: chatId + первые 200 символов текста (без timestamp/динамических частей)
-  const normalized = text.slice(0, 200).replace(/\d+\.\d+/g, "N"); // заменяем числа на N для лучшей дедупликации
+  // ✅ ИСПРАВЛЕНО: заменяем ВСЕ числа (включая целые) на N для лучшей дедупликации
+  const normalized = text.slice(0, 200).replace(/\d+/g, "N"); 
   return `${chatId}:${normalized}`;
 }
 
