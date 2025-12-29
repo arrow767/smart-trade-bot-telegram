@@ -196,7 +196,7 @@ export function startTaskRecoveryLoop(
       }
       
       // ✅ КРИТИЧНО: Проверка статуса entry ордеров для waiting_fill задач
-      // Это решает проблему когда ордер исполнился/отменился пока бот был выключен
+      // Это работает ПОСТОЯННО (не только при старте) — отслеживает отмену/исполнение ордеров
       //
       // Binance статусы ордеров:
       // - NEW: ордер создан, ожидает исполнения
@@ -215,82 +215,102 @@ export function startTaskRecoveryLoop(
           const entryIds = task.entryOrderIds || [];
           if (entryIds.length === 0) continue;
           
-          // Получаем статус entry ордеров (Binance статусы: NEW, PARTIALLY_FILLED, FILLED, CANCELED, EXPIRED, REJECTED)
-          const orderStatuses = await ex.fetchOrdersStatus(symbol, entryIds);
+          // ✅ НОВОЕ: Сначала проверяем есть ли ордера в открытых (быстрая проверка)
+          const openOrders = (await ex.fetchOpenOrders(symbol)) as any[];
+          let algoOrders: any[] = [];
+          try { algoOrders = await ex.fetchOpenAlgoOrders(symbol); } catch {}
           
+          const allOpenIds = new Set<string>();
+          for (const o of [...openOrders, ...algoOrders]) {
+            allOpenIds.add(String(o.id || o.orderId || ""));
+            allOpenIds.add(String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || ""));
+            if (o.info?.orderId) allOpenIds.add(String(o.info.orderId));
+            if (o.algoId) allOpenIds.add(String(o.algoId));
+          }
+          
+          // Проверяем сколько entry ордеров еще открыто
+          const stillOpen = entryIds.filter(id => allOpenIds.has(String(id)));
+          const notOpen = entryIds.filter(id => !allOpenIds.has(String(id)));
+          
+          // Если все entry ордера еще открыты — задача ждёт
+          if (stillOpen.length === entryIds.length) {
+            continue;
+          }
+          
+          // ✅ Если какие-то ордера исчезли из открытых — проверяем их статус в истории
           let filledQty = 0;
           let filledValue = 0;
-          let allTerminal = true; // Все ордера в финальном статусе (не NEW/PARTIALLY_FILLED)
-          let anyActive = false;  // Есть ли активные ордера (NEW или PARTIALLY_FILLED)
-          let anyNotFound = false; // Есть ли ордера которые не нашли
+          let allCanceledOrExpired = true;
           
-          for (const orderId of entryIds) {
-            const status = orderStatuses.get(orderId);
-            if (!status) {
-              // Ордер не найден - возможно Algo Order или очень старый
-              anyNotFound = true;
-              allTerminal = false;
-              continue;
-            }
+          if (notOpen.length > 0) {
+            const orderStatuses = await ex.fetchOrdersStatus(symbol, notOpen);
             
-            const st = status.status;
-            
-            // Активные статусы - ордер еще может исполниться
-            if (st === "NEW" || st === "PARTIALLY_FILLED") {
-              anyActive = true;
-              allTerminal = false;
-              // Для PARTIALLY_FILLED учитываем уже исполненную часть
-              if (st === "PARTIALLY_FILLED" && status.filled > 0) {
-                filledQty += status.filled;
-                filledValue += status.filled * status.average;
+            for (const orderId of notOpen) {
+              const status = orderStatuses.get(orderId);
+              if (!status) {
+                // Ордер не найден в истории — возможно Algo Order
+                // Проверяем позицию чтобы понять исполнился ли он
+                allCanceledOrExpired = false;
+                continue;
               }
-            }
-            // FILLED - полностью исполнен
-            else if (st === "FILLED") {
-              filledQty += status.filled;
-              filledValue += status.filled * status.average;
-            }
-            // CANCELED, EXPIRED, REJECTED - финальные статусы
-            else if (st === "CANCELED" || st === "EXPIRED" || st === "REJECTED") {
-              // Проверяем partial fill (ордер мог частично исполниться перед отменой)
-              if (status.filled > 0) {
+              
+              const st = status.status;
+              
+              if (st === "FILLED" || (st === "PARTIALLY_FILLED" && status.filled > 0)) {
                 filledQty += status.filled;
                 filledValue += status.filled * status.average;
+                allCanceledOrExpired = false;
+              } else if (st === "CANCELED" || st === "EXPIRED" || st === "REJECTED") {
+                // Проверяем partial fill
+                if (status.filled > 0) {
+                  filledQty += status.filled;
+                  filledValue += status.filled * status.average;
+                  allCanceledOrExpired = false;
+                }
+                // Если filled=0 - ордер полностью отменен
+              } else if (st === "NEW") {
+                // Странно - ордер NEW но не в открытых? Считаем активным
+                allCanceledOrExpired = false;
               }
             }
           }
           
-          // Если есть активные ордера (NEW или PARTIALLY_FILLED) - задача продолжает ждать
-          if (anyActive) {
+          // Если еще есть открытые ордера — ждём
+          if (stillOpen.length > 0) {
             // Но если уже что-то исполнилось - обновим taskEntry
             if (filledQty > 0 && (!task.taskEntryQty || task.taskEntryQty < filledQty)) {
               const avgPrice = filledValue / filledQty;
               book.setTaskEntry(task, avgPrice, filledQty);
-              log(`📊 Recovery: задача #${task.id} ${symbol} частично исполнена (${fmtQty5(filledQty)} @ ${avgPrice.toFixed(4)}), ждём остальное`);
+              log(`📊 Recovery: задача #${task.id} ${symbol} частично исполнена (${fmtQty5(filledQty)}), ждём остальное`);
             }
             continue;
           }
           
-          // Если все найденные ордера в финальном статусе и ничего не исполнено - отменяем задачу
-          if (allTerminal && filledQty === 0 && !anyNotFound) {
-            // Проверяем позицию на всякий случай (вдруг ордер исполнился другим путём)
-            const filters = ex.getSymbolFilters(symbol);
-            const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
-            if (posSize < (filters?.minQty || 0) * 0.5) {
-              book.set(task, "canceled");
-              log(`🚫 Recovery: задача #${task.id} ${symbol} отменена (все entry ордера в статусе CANCELED/EXPIRED/REJECTED)`);
-              continue;
+          // Нет открытых ордеров — проверяем что случилось
+          
+          // Проверяем позицию
+          const filters = ex.getSymbolFilters(symbol);
+          const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
+          const hasPosition = posSize > (filters?.minQty || 0) * 0.5;
+          
+          // Если есть позиция — значит ордера исполнились
+          if (hasPosition || filledQty > 0) {
+            const avgPrice = filledQty > 0 ? filledValue / filledQty : 0;
+            if (filledQty > 0) {
+              book.setTaskEntry(task, avgPrice, filledQty);
             }
+            book.set(task, "live");
+            log(`🔄 Recovery: задача #${task.id} ${symbol} → live (entry исполнен, pos=${fmtQty5(posSize)})`);
+            continue;
           }
           
-          // Если что-то исполнилось - обновляем taskEntry и переводим в live
-          if (filledQty > 0) {
-            const avgPrice = filledValue / filledQty;
-            book.setTaskEntry(task, avgPrice, filledQty);
-            book.set(task, "live");
-            log(`🔄 Recovery: задача #${task.id} ${symbol} → live (entry FILLED: ${fmtQty5(filledQty)} @ ${avgPrice.toFixed(4)})`);
-            // ensureBracketsForTask будет вызван ниже когда проверим позиции
+          // Нет позиции и нет открытых ордеров — ордера отменены
+          if (allCanceledOrExpired || notOpen.length === entryIds.length) {
+            book.set(task, "canceled");
+            log(`🚫 Recovery: задача #${task.id} ${symbol} отменена (entry ордера отменены/истекли, позиции нет)`);
+            continue;
           }
+          
         } catch (e: any) {
           // Не ломаем recovery если одна задача упала
           console.warn(`[WARN] Recovery: ошибка проверки entry ордеров для #${task.id}: ${e?.message || e}`);

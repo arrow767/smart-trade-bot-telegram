@@ -74,6 +74,11 @@ function getMessageHash(chatId: number | string, text: string): string | null {
     /📊\s*Positions/i,       // positions header (любой формат)
     /💰\s*Deposit/i,         // deposit header
     /🧰\s*Tasks/i,           // tasks header
+    /<pre>▶/,                // ✅ НОВОЕ: tasks/positions/orders в <pre> формате
+    /Нет активных задач/i,   // ✅ НОВОЕ: empty tasks
+    /No active tasks/i,      // ✅ НОВОЕ: empty tasks (English)
+    /OPEN ORDERS/i,          // ✅ НОВОЕ: orders header
+    /<pre>\s*#\d+\s/,        // ✅ НОВОЕ: task details (#123 ...)
     /<pre>TICKER/i,          // positions table (pre format)
     /Total:\s*\$/i,          // deposit total
     /Futures\s*USDT/i,       // deposit details
