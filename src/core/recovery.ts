@@ -182,6 +182,84 @@ export function startTaskRecoveryLoop(
         } catch {}
       }
       
+      // ✅ КРИТИЧНО: Проверка статуса entry ордеров для waiting_fill задач
+      // Это решает проблему когда ордер исполнился/отменился пока бот был выключен
+      const waitingFillTasks = activeTasks.filter(t => t.status === "waiting_fill" && t.entryOrderIds?.length);
+      for (const task of waitingFillTasks) {
+        try {
+          const symbol = task.symbolCcxt;
+          if (!symbol) continue;
+          
+          const entryIds = task.entryOrderIds || [];
+          if (entryIds.length === 0) continue;
+          
+          // Получаем статус entry ордеров
+          const orderStatuses = await ex.fetchOrdersStatus(symbol, entryIds);
+          
+          let filledQty = 0;
+          let filledValue = 0;
+          let allCanceled = true;
+          let anyOpen = false;
+          
+          for (const orderId of entryIds) {
+            const status = orderStatuses.get(orderId);
+            if (!status) {
+              // Ордер не найден - возможно Algo Order или очень старый
+              // Не считаем canceled, проверим позицию
+              allCanceled = false;
+              continue;
+            }
+            
+            if (status.status === "open") {
+              anyOpen = true;
+              allCanceled = false;
+            } else if (status.status === "closed" && status.filled > 0) {
+              // Ордер исполнен (полностью или частично)
+              filledQty += status.filled;
+              filledValue += status.filled * status.average;
+              allCanceled = false;
+            } else if (status.status === "canceled" || status.status === "expired" || status.status === "rejected") {
+              // Ордер отменен - проверяем partial fill
+              if (status.filled > 0) {
+                filledQty += status.filled;
+                filledValue += status.filled * status.average;
+                allCanceled = false;
+              }
+              // Если filled=0, то ордер отменен без исполнения
+            }
+          }
+          
+          // Если есть открытые ордера - задача продолжает ждать
+          if (anyOpen) {
+            continue;
+          }
+          
+          // Если все ордера отменены и ничего не исполнено - отменяем задачу
+          if (allCanceled && filledQty === 0) {
+            // Проверяем позицию на всякий случай
+            const filters = ex.getSymbolFilters(symbol);
+            const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
+            if (posSize < (filters?.minQty || 0) * 0.5) {
+              book.set(task, "canceled");
+              log(`🚫 Recovery: задача #${task.id} ${symbol} отменена (все entry ордера отменены)`);
+              continue;
+            }
+          }
+          
+          // Если что-то исполнилось - обновляем taskEntry и переводим в live
+          if (filledQty > 0) {
+            const avgPrice = filledValue / filledQty;
+            book.setTaskEntry(task, avgPrice, filledQty);
+            book.set(task, "live");
+            log(`🔄 Recovery: задача #${task.id} ${symbol} → live (entry filled: ${fmtQty5(filledQty)} @ ${avgPrice.toFixed(4)})`);
+            // ensureBracketsForTask будет вызван ниже когда проверим позиции
+          }
+        } catch (e: any) {
+          // Не ломаем recovery если одна задача упала
+          console.warn(`[WARN] Recovery: ошибка проверки entry ордеров для #${task.id}: ${e?.message || e}`);
+        }
+      }
+      
       // ✅ НОВОЕ: Проверка на orphan ордера (ордера без задач)
       if (cleanupOrphanOrdersEnabled && activeTasks.length === 0 && allTasks.length === 0) {
         // Если вообще нет задач — проверяем все позиции на наличие ордеров

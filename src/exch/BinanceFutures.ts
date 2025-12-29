@@ -941,4 +941,67 @@ export class BinanceFutures {
       throw e;
     }
   }
+
+  /**
+   * ✅ НОВОЕ: Получить статус ордера по ID
+   * Возвращает: { status: "open"|"closed"|"canceled", filled: number, average: number, ... }
+   * Если ордер не найден — бросает исключение
+   */
+  async fetchOrder(symbol: string, orderId: string): Promise<{
+    id: string;
+    status: "open" | "closed" | "canceled" | "expired" | "rejected";
+    filled: number;
+    remaining: number;
+    average: number;
+    price: number;
+    side: "buy" | "sell";
+    type: string;
+    info: any;
+  }> {
+    const order = await this.fapi.fetchOrder(orderId, symbol);
+    return {
+      id: String(order.id),
+      status: order.status as any,
+      filled: Number(order.filled || 0),
+      remaining: Number(order.remaining || 0),
+      average: Number(order.average || order.price || 0),
+      price: Number(order.price || 0),
+      side: order.side as "buy" | "sell",
+      type: String(order.type || ""),
+      info: order.info,
+    };
+  }
+
+  /**
+   * ✅ НОВОЕ: Получить статус нескольких ордеров по ID (batch)
+   * Возвращает Map<orderId, orderStatus>
+   * Ордера которые не найдены — пропускаются (не в Map)
+   */
+  async fetchOrdersStatus(symbol: string, orderIds: string[]): Promise<Map<string, {
+    status: "open" | "closed" | "canceled" | "expired" | "rejected";
+    filled: number;
+    average: number;
+  }>> {
+    const result = new Map<string, { status: any; filled: number; average: number }>();
+    
+    for (const orderId of orderIds) {
+      try {
+        const order = await this.fetchOrder(symbol, orderId);
+        result.set(orderId, {
+          status: order.status,
+          filled: order.filled,
+          average: order.average,
+        });
+      } catch (e: any) {
+        // Ордер не найден — пропускаем (может быть Algo Order)
+        // Логируем только если это не "order does not exist"
+        const msg = String(e?.message || "");
+        if (!/order.*not.*exist|no.*order|unknown.*order/i.test(msg)) {
+          console.warn(`[WARN] fetchOrder(${orderId}) failed: ${msg}`);
+        }
+      }
+    }
+    
+    return result;
+  }
 }
