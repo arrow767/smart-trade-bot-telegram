@@ -68,8 +68,8 @@ const DEDUP_MAX_ENTRIES = 200; // максимум записей в кэше
 const recentMessages = new Map<string, number>(); // hash → timestamp
 
 function getMessageHash(chatId: number | string, text: string): string | null {
-  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к командам positions/deposit/tasks/orders
-  // Эти команды должны всегда показывать актуальные данные
+  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к этим сообщениям
+  // Они должны всегда показываться
   const skipDedupPatterns = [
     /📊\s*Positions/i,       // positions header (любой формат)
     /💰\s*Deposit/i,         // deposit header
@@ -80,6 +80,9 @@ function getMessageHash(chatId: number | string, text: string): string | null {
     /Открытых\s*позиций/i,   // no positions message
     /Нет\s*активных\s*задач/i, // no tasks message
     /📋\s*Orders/i,          // orders header
+    /🟢\s*<b>LONG/i,         // ✅ НОВОЕ: trade confirmation (LONG)
+    /🔴\s*<b>SHORT/i,        // ✅ НОВОЕ: trade confirmation (SHORT)
+    /Risk:\s*\$/i,           // ✅ НОВОЕ: trade confirmation risk line
   ];
   
   for (const pattern of skipDedupPatterns) {
@@ -1074,18 +1077,11 @@ bot.on("text", async (ctx)=>{
         
         const msg = await safeReply(ctx, notification, { parse_mode: "HTML", ...confirmButtons });
         
-        // ✅ ИСПРАВЛЕНО: Проверяем что сообщение отправлено (не null из-за дедупликации)
+        // ✅ ИСПРАВЛЕНО: Если сообщение не отправлено — просто выходим, НЕ выполняем команду
+        // Trade confirmations теперь исключены из дедупликации, так что это не должно происходить
         if (!msg || !msg.message_id) {
-          // Если сообщение не отправлено (дедупликация), выполняем команду сразу
-          console.warn(`[WARN] Trade notification was deduplicated, executing command immediately`);
-          await runCommand(
-            ex, 
-            book, 
-            parsed, 
-            (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
-            (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
-            "telegram"
-          );
+          console.warn(`[WARN] Trade notification not sent (msg=${msg}), NOT executing command`);
+          await safeReply(ctx, "⚠️ Не удалось отправить подтверждение. Повторите команду.", { parse_mode: "HTML" });
           return;
         }
         
