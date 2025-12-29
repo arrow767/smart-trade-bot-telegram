@@ -68,38 +68,38 @@ const DEDUP_MAX_ENTRIES = 200; // максимум записей в кэше
 const recentMessages = new Map<string, number>(); // hash → timestamp
 
 function getMessageHash(chatId: number | string, text: string): string | null {
-  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к этим сообщениям
-  // Они должны всегда показываться
-  const skipDedupPatterns = [
-    /📊\s*Positions/i,       // positions header (любой формат)
-    /💰\s*Deposit/i,         // deposit header
+  // ✅ КРИТИЧНО: Полностью отключаем дедупликацию для интерактивных команд
+  // Они должны ВСЕГДА показываться с актуальными данными
+  const alwaysShowPatterns = [
+    /📊\s*Positions/i,       // positions
+    /💰\s*Deposit/i,         // deposit
     /🧰\s*Tasks/i,           // tasks header
-    /<pre>▶/,                // ✅ НОВОЕ: tasks/positions/orders в <pre> формате
-    /Нет активных задач/i,   // ✅ НОВОЕ: empty tasks
-    /No active tasks/i,      // ✅ НОВОЕ: empty tasks (English)
-    /OPEN ORDERS/i,          // ✅ НОВОЕ: orders header
-    /<pre>\s*#\d+\s/,        // ✅ НОВОЕ: task details (#123 ...)
-    /<pre>TICKER/i,          // positions table (pre format)
+    /<pre>▶/,                // tasks/positions/orders в <pre> формате  
+    /<pre>/,                 // ✅ ЛЮБОЙ pre блок (tasks, orders, positions)
+    /Нет активных задач/i,   // empty tasks
+    /No active tasks/i,      // empty tasks (English)
+    /OPEN ORDERS/i,          // orders header
+    /📋\s*Orders/i,          // orders header
     /Total:\s*\$/i,          // deposit total
     /Futures\s*USDT/i,       // deposit details
-    /Открытых\s*позиций/i,   // no positions message
-    /Нет\s*активных\s*задач/i, // no tasks message
-    /📋\s*Orders/i,          // orders header
-    /🟢\s*<b>LONG/i,         // ✅ НОВОЕ: trade confirmation (LONG)
-    /🔴\s*<b>SHORT/i,        // ✅ НОВОЕ: trade confirmation (SHORT)
-    /Risk:\s*\$/i,           // ✅ НОВОЕ: trade confirmation risk line
+    /Открытых\s*позиций/i,   // no positions
+    /🟢\s*<b>LONG/i,         // trade confirmation (LONG)
+    /🔴\s*<b>SHORT/i,        // trade confirmation (SHORT)
+    /Risk:\s*\$/i,           // trade confirmation
+    /🚫\s*Задача/i,          // ✅ НОВОЕ: task canceled notification
+    /🧹/,                    // ✅ НОВОЕ: cleanup notifications
+    /🔄\s*Recovery/i,        // ✅ НОВОЕ: recovery notifications
+    /🧯\s*Recovery/i,        // ✅ НОВОЕ: recovery SL/TP notifications
   ];
   
-  for (const pattern of skipDedupPatterns) {
+  for (const pattern of alwaysShowPatterns) {
     if (pattern.test(text)) {
-      // Возвращаем null чтобы пропустить дедупликацию
-      return null;
+      return null; // skip dedup
     }
   }
   
-  // Для остальных сообщений: заменяем только числа в ценах/суммах (с точками)
-  // НО сохраняем структуру сообщения
-  const normalized = text.slice(0, 200).replace(/\d+\.\d+/g, "N.N"); // цены с точкой
+  // Для остальных сообщений: нормализуем числа для дедупликации
+  const normalized = text.slice(0, 200).replace(/\d+\.\d+/g, "N.N");
   return `${chatId}:${normalized}`;
 }
 
@@ -138,10 +138,17 @@ async function safeReply(
 ): Promise<any> {
   // ✅ Дедупликация: пропускаем если сообщение уже отправлено недавно
   const chatId = ctx?.chat?.id || ctx?.from?.id || "unknown";
+  
+  // ✅ DEBUG: Логируем что пытаемся отправить
+  const preview = text.slice(0, 60).replace(/\n/g, " ");
+  console.log(`[TG] safeReply to ${chatId}: "${preview}..."`);
+  
   if (isDuplicate(chatId, text)) {
     console.log(`[DEDUP] Skipping duplicate message to ${chatId}: ${text.slice(0, 50)}...`);
     return null;
   }
+  
+  console.log(`[TG] Sending message to ${chatId}...`);
   
   let lastError: any;
   
@@ -153,7 +160,9 @@ async function safeReply(
       });
       
       const replyPromise = ctx.reply(text, options);
-      return await Promise.race([replyPromise, timeoutPromise]);
+      const result = await Promise.race([replyPromise, timeoutPromise]);
+      console.log(`[TG] ✅ Message sent successfully to ${chatId}`);
+      return result;
     } catch (e: any) {
       lastError = e;
       
