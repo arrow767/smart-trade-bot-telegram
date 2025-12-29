@@ -11,13 +11,21 @@ import { mergeDustToPrev, splitQtyToStep } from "../utils/math";
 function hasClosePositionSL(orders: any[]): boolean {
   for (const o of orders) {
     const t = String(o?.type || o?.strategyType || "").toUpperCase();
-    const isStop = t.includes("STOP") || t.includes("TAKE_PROFIT"); // STOP_MARKET, STOP, TAKE_PROFIT
+    const isStop = t.includes("STOP") || t.includes("TAKE_PROFIT");
+    
+    // Проверяем closePosition в разных местах (обычные ордера и Algo Orders)
     const cp = o?.closePosition === true || o?.closePosition === "true" || 
-               o?.info?.closePosition === true || o?.info?.closePosition === "true" ||
-               // ✅ НОВОЕ: Algo orders могут иметь другую структуру
-               o?.strategyType === "STOP" || o?.strategyType === "STOP_MARKET";
+               o?.info?.closePosition === true || o?.info?.closePosition === "true";
+    
+    // ✅ ИСПРАВЛЕНО: Algo Orders имеют strategyType и могут не иметь closePosition явно
+    // Если это STOP/STOP_MARKET Algo Order без quantity — это closePosition SL
+    const isAlgoSL = (o?.strategyType === "STOP" || o?.strategyType === "STOP_MARKET") && 
+                     (!o?.quantity || o?.quantity === "0" || Number(o?.quantity) === 0);
+    
     if (isStop && cp) return true;
-    // ✅ НОВОЕ: Любой STOP_MARKET с closePosition считаем SL
+    if (isAlgoSL) return true;
+    
+    // Любой STOP_MARKET с closePosition считаем SL
     if (t === "STOP_MARKET" || t === "STOP") {
       const hasCP = o?.closePosition || o?.info?.closePosition;
       if (hasCP === true || hasCP === "true") return true;
@@ -205,13 +213,17 @@ async function ensureBracketsForTask(
       const keep = new Set((task.entryOrderIds || []).map(String));
       await cancelOnlySL(ex, symbol, keep).catch(() => {});
       try {
-        await ex.createStopMarketClose(symbol, sideExit as any, safeSL);
-        log(`🧯 Recovery: SL выставлен для #${task.id} ${symbol} (${side}) @ ${safeSL}`);
+        const slResult = await ex.createStopMarketClose(symbol, sideExit as any, safeSL);
+        // ✅ ИСПРАВЛЕНО: Не логируем если SL был skipped (уже существует или нет позиции)
+        const wasSkipped = slResult?.info?.skipped === true || 
+                           String(slResult?.id || "").startsWith("skipped");
+        if (!wasSkipped) {
+          log(`🧯 Recovery: SL выставлен для #${task.id} ${symbol} (${side}) @ ${safeSL}`);
+        }
       } catch (slErr: any) {
         const known = isKnownAlgoError(slErr);
         if (known.ignore) {
           // -4509: нет позиции, -4130: SL уже есть — не спамим
-          // Логируем только раз на уровне debug
         } else {
           throw slErr; // Пробрасываем неизвестные ошибки
         }
@@ -570,9 +582,14 @@ export function startTaskRecoveryLoop(
             // Позиция закрыта и ордеров нет — удаляем live задачи
             for (const t of liveTasks) {
               book.remove(t.id);
+              // ✅ НОВОЕ: Проверяем что задача реально удалена
+              const stillExists = book.get(t.id);
+              if (stillExists) {
+                console.warn(`[WARN] Recovery: task #${t.id} still exists after remove!`);
+              }
               const msg = `🧹 Позиция ${symbol} закрыта вручную — задача #${t.id} удалена`;
               log(msg);
-              notify?.(msg); // ✅ НОВОЕ: Отправляем в Telegram
+              notify?.(msg);
             }
             continue;
           }
