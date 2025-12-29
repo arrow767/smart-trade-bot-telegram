@@ -93,6 +93,11 @@ export type Task = {
    * ✅ НОВОЕ: Флаг, что эта задача была отменена в рамках цепочки (superseded более новой задачей).
    */
   supersededBy?: number;
+  
+  /**
+   * ✅ НОВОЕ: Если true — автоматические SL/TP отключены для этой задачи.
+   */
+  noPreset?: boolean;
 };
 
 export const DEFAULT_PRESET = "4h";

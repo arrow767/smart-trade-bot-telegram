@@ -911,7 +911,7 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: riskUsdOverride });
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: riskUsdOverride, noPreset });
     book.setEntryOrders(task, [] as string[]);
 
     book.set(task, "waiting_fill");
@@ -1254,7 +1254,7 @@ export async function runCommand(
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName: presetNameEffective, riskUsd: riskUsdOverride }
+    { side, totalUsd, presetName: presetNameEffective, riskUsd: riskUsdOverride, noPreset }
   );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);

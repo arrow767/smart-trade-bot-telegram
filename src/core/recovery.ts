@@ -70,6 +70,12 @@ async function ensureBracketsForTask(
     log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (pos=${fmtQty5(posSize)} @ ${entryAvg})`);
   }
 
+  // ✅ НОВОЕ: Если noPreset=true — не ставим SL/TP
+  if (task.noPreset) {
+    log(`⏭️ Recovery: задача #${task.id} ${symbol} с noPreset — SL/TP не выставляем`);
+    return;
+  }
+
   const tick = await ex.fetchTicker(symbol);
   const mark = Number(tick.last ?? tick.mark ?? (tick as any)?.info?.markPrice);
 
@@ -387,7 +393,14 @@ export function startTaskRecoveryLoop(
           emptySinceBySymbol.delete(symbol);
           const task = pickTaskForSymbol(ts, pos.side);
           if (task) {
-            await ensureBracketsForTask(ex, book, task, pos, log).catch(() => {});
+            try {
+              await ensureBracketsForTask(ex, book, task, pos, log);
+            } catch (e: any) {
+              console.warn(`[WARN] Recovery: ensureBracketsForTask failed for #${task.id} ${symbol}: ${e?.message || e}`);
+            }
+          } else {
+            // ✅ DEBUG: Нет подходящей задачи для позиции
+            console.log(`[DEBUG] Recovery: position exists for ${symbol} (${pos.side}) but no matching task found. Tasks: ${ts.map(t => `#${t.id}[${t.status}]`).join(", ")}`);
           }
           continue;
         }

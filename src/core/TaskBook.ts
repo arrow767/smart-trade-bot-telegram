@@ -83,6 +83,8 @@ export class TaskBook {
           taskEntryAvg: Number(o.taskEntryAvg || 0) || undefined,
           taskEntryQty: Number(o.taskEntryQty || 0) || undefined,
           supersededBy: Number(o.supersededBy || 0) || undefined,
+          // ✅ НОВОЕ: флаг отключения SL/TP
+          noPreset: o.noPreset === true || o.noPreset === "true",
         };
         this.tasks.set(t.id, t);
       }
@@ -92,7 +94,7 @@ export class TaskBook {
   add(
     symbolCcxt: string,
     label: string,
-    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number }
+    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number; noPreset?: boolean }
   ) {
     const t: Task = {
       id: TASK_ID_SEQ++,
@@ -105,6 +107,7 @@ export class TaskBook {
       totalUsd: extras?.totalUsd,
       presetName: extras?.presetName,
       riskUsd: (typeof extras?.riskUsd === "number" && Number.isFinite(extras.riskUsd) && extras.riskUsd > 0) ? extras.riskUsd : undefined,
+      noPreset: extras?.noPreset || false,
     };
     this.tasks.set(t.id, t);
     this.save();
