@@ -468,7 +468,7 @@ export function formatTradeNotification(p: {
   noPreset?: boolean; // ✅ НОВОЕ: флаг отключения пресета
   // ✅ НОВОЕ: информация о существующих задачах и ордерах по монете
   existingTasks?: Array<{ id: number; status: string; side?: string; totalUsd?: number; entryPrice?: number }>;
-  existingOrders?: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean }>;
+  existingOrders?: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean; reduceOnly?: boolean; closePosition?: boolean }>;
 }): string {
   const sideEmoji = p.side === "long" ? "🟢" : "🔴";
   const sideText = p.side === "long" ? "LONG" : "SHORT";
@@ -524,7 +524,21 @@ export function formatTradeNotification(p: {
       const sideIcon = o.side === "buy" ? "🟢" : "🔴";
       const priceInfo = o.stopPrice ? `@ ${o.stopPrice}` : (o.price ? `@ ${o.price}` : "");
       const qtyInfo = o.qty ? ` (qty: ${o.qty.toFixed(4)})` : "";
-      const label = o.isEntry ? " [entry]" : (o.type.includes("STOP") ? " [SL]" : " [TP]");
+      
+      // ✅ ИСПРАВЛЕНО: Правильная логика определения типа ордера
+      let label = "";
+      if (o.isEntry) {
+        label = " [entry]";
+      } else if (o.reduceOnly || o.closePosition) {
+        // Это exit-ордер (SL или TP)
+        if (o.stopPrice || o.type.includes("STOP")) {
+          label = " [SL]";
+        } else {
+          label = " [TP]";
+        }
+      }
+      // Если нет reduceOnly/closePosition и не entry - это ручной ордер, без label
+      
       msg += `  ${typeEmoji}${sideIcon} ${o.type}${label}: ${priceInfo}${qtyInfo}\n`;
     }
   }

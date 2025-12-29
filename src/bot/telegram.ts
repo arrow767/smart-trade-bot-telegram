@@ -1003,7 +1003,7 @@ bot.on("text", async (ctx)=>{
         } catch {}
         
         // ✅ НОВОЕ: Получаем существующие ордера по монете
-        let existingOrders: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean }> = [];
+        let existingOrders: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean; reduceOnly?: boolean; closePosition?: boolean }> = [];
         try {
           // Получаем IDs входных ордеров из всех задач
           const entryOrderIds = new Set<string>();
@@ -1018,6 +1018,8 @@ bot.on("text", async (ctx)=>{
             const orderType = String(o.type || o.info?.type || "").toUpperCase();
             const orderSide = String(o.side || "").toLowerCase();
             const isEntry = entryOrderIds.has(orderId);
+            const reduceOnly = o.reduceOnly || o.info?.reduceOnly === "true" || o.info?.reduceOnly === true;
+            const closePosition = o.info?.closePosition === "true" || o.info?.closePosition === true;
             
             existingOrders.push({
               type: orderType,
@@ -1026,6 +1028,8 @@ bot.on("text", async (ctx)=>{
               qty: Number(o.amount ?? o.info?.origQty ?? 0) || undefined,
               stopPrice: Number(o.info?.stopPrice ?? 0) || undefined,
               isEntry,
+              reduceOnly,
+              closePosition,
             });
           }
           
@@ -1037,6 +1041,8 @@ bot.on("text", async (ctx)=>{
               const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
               const orderSide = String(ao.side || "").toLowerCase();
               const isEntry = entryOrderIds.has(algoId);
+              const reduceOnly = ao.reduceOnly || ao.info?.reduceOnly === "true" || ao.info?.reduceOnly === true;
+              const closePosition = ao.closePosition || ao.info?.closePosition === "true" || ao.info?.closePosition === true;
               
               existingOrders.push({
                 type: orderType,
@@ -1045,6 +1051,8 @@ bot.on("text", async (ctx)=>{
                 qty: Number(ao.quantity || ao.origQty || 0) || undefined,
                 stopPrice: Number(ao.triggerPrice || ao.stopPrice || 0) || undefined,
                 isEntry,
+                reduceOnly,
+                closePosition,
               });
             }
           } catch {}
