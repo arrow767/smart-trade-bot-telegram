@@ -233,42 +233,61 @@ async function ensureBracketsForTask(
 
   if (!hasTP) {
     // ✅ КРИТИЧНО: Проверяем позицию перед размещением TP
+    let currentPosSize = actualPosSize;
     try {
       const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
       if (checkPos < minQty * 0.5) {
         // Позиция закрыта — не ставим TP
+        console.log(`[DEBUG] Recovery TP: позиция закрыта для ${symbol}, не ставим TP`);
         return;
       }
-      // Используем актуальный размер для TP
-      actualPosSize = checkPos;
-    } catch {
-      // При ошибке — используем известный размер
+      currentPosSize = checkPos;
+    } catch (e: any) {
+      console.warn(`[WARN] Recovery TP: ошибка получения позиции для ${symbol}: ${e?.message}`);
     }
     
-    const re = planTargets({ side, entryPrice: entryAvg, positionUsd: actualPosSize * entryAvg, preset });
-    let tpQtys = splitQtyToStep(actualPosSize, preset.take_profit_ratio, filters.stepSize);
+    const positionUsd = currentPosSize * entryAvg;
+    const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+    
+    console.log(`[DEBUG] Recovery TP: ${symbol} pos=${fmtQty5(currentPosSize)}, entryAvg=${entryAvg}, tpPrices=${re.tpPrices.length}`);
+    
+    let tpQtys = splitQtyToStep(currentPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
     tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbol, q)));
+    
+    console.log(`[DEBUG] Recovery TP: tpQtys=${tpQtys.join(",")}, minQty=${filters.minQty}`);
 
     let placed = 0;
+    let errors: string[] = [];
     for (let i = 0; i < re.tpPrices.length; i++) {
       const q = tpQtys[i];
-      if (!(q > 0) || q < filters.minQty) continue;
+      if (!(q > 0) || q < filters.minQty) {
+        console.log(`[DEBUG] Recovery TP: skip TP${i+1} qty=${q} < minQty=${filters.minQty}`);
+        continue;
+      }
       const p = Number(ex.priceToPrecision(symbol, re.tpPrices[i]));
       try {
-        await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
-        placed++;
+        const result = await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
+        // ✅ Проверяем что ордер реально создан
+        const wasSkipped = result?.info?.skipped === true || String(result?.id || "").startsWith("skipped");
+        if (!wasSkipped) {
+          placed++;
+        } else {
+          errors.push(`TP${i+1} skipped`);
+        }
       } catch (tpErr: any) {
         const known = isKnownAlgoError(tpErr);
         if (known.ignore) {
-          // -2022: нет позиции — не спамим
-          break; // Прекращаем выставление TP
+          errors.push(`TP${i+1}: ${known.code}`);
+          break;
         }
-        // Другие ошибки — продолжаем пробовать следующий TP
+        errors.push(`TP${i+1}: ${tpErr?.message?.slice(0, 50)}`);
       }
     }
     if (placed > 0) {
-      log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(actualPosSize)})`);
+      log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(currentPosSize)})`);
+    } else if (errors.length > 0) {
+      console.warn(`[WARN] Recovery TP: не удалось выставить TP для #${task.id} ${symbol}: ${errors.join(", ")}`);
     }
   }
 }
@@ -382,81 +401,38 @@ export function startTaskRecoveryLoop(
             continue;
           }
           
-          // ✅ Если какие-то ордера исчезли из открытых — проверяем их статус в истории
-          let filledQty = 0;
-          let filledValue = 0;
-          let allCanceledOrExpired = true;
-          
-          if (notOpen.length > 0) {
-            const orderStatuses = await ex.fetchOrdersStatus(symbol, notOpen);
-            
-            for (const orderId of notOpen) {
-              const status = orderStatuses.get(orderId);
-              if (!status) {
-                // Ордер не найден в истории — возможно Algo Order
-                // Проверяем позицию чтобы понять исполнился ли он
-                allCanceledOrExpired = false;
-                continue;
-              }
-              
-              const st = status.status;
-              
-              if (st === "FILLED" || (st === "PARTIALLY_FILLED" && status.filled > 0)) {
-                filledQty += status.filled;
-                filledValue += status.filled * status.average;
-                allCanceledOrExpired = false;
-              } else if (st === "CANCELED" || st === "EXPIRED" || st === "REJECTED") {
-                // Проверяем partial fill
-                if (status.filled > 0) {
-                  filledQty += status.filled;
-                  filledValue += status.filled * status.average;
-                  allCanceledOrExpired = false;
-                }
-                // Если filled=0 - ордер полностью отменен
-              } else if (st === "NEW") {
-                // Странно - ордер NEW но не в открытых? Считаем активным
-                allCanceledOrExpired = false;
-              }
-            }
-          }
-          
-          // Если еще есть открытые ордера — ждём
-          if (stillOpen.length > 0) {
-            // Но если уже что-то исполнилось - обновим taskEntry
-            if (filledQty > 0 && (!task.taskEntryQty || task.taskEntryQty < filledQty)) {
-              const avgPrice = filledValue / filledQty;
-              book.setTaskEntry(task, avgPrice, filledQty);
-              log(`📊 Recovery: задача #${task.id} ${symbol} частично исполнена (${fmtQty5(filledQty)}), ждём остальное`);
-            }
-            continue;
-          }
-          
-          // Нет открытых ордеров — проверяем что случилось
-          
-          // Проверяем позицию
+          // ✅ ИСПРАВЛЕНО: Проверяем позицию СРАЗУ, это главный индикатор
           const filters = ex.getSymbolFilters(symbol);
           const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
           const hasPosition = posSize > (filters?.minQty || 0) * 0.5;
           
-          // Если есть позиция — значит ордера исполнились
-          if (hasPosition || filledQty > 0) {
-            const avgPrice = filledQty > 0 ? filledValue / filledQty : 0;
-            if (filledQty > 0) {
-              book.setTaskEntry(task, avgPrice, filledQty);
+          // Если есть открытые ордера — ждём
+          if (stillOpen.length > 0) {
+            // Но если уже есть позиция — переводим в live
+            if (hasPosition) {
+              book.set(task, "live");
+              log(`🔄 Recovery: задача #${task.id} ${symbol} → live (позиция открыта, ждём остальные входы)`);
             }
+            continue;
+          }
+          
+          // Нет открытых entry ордеров — проверяем что случилось
+          
+          // Если есть позиция — значит ордера исполнились
+          if (hasPosition) {
             book.set(task, "live");
             log(`🔄 Recovery: задача #${task.id} ${symbol} → live (entry исполнен, pos=${fmtQty5(posSize)})`);
             continue;
           }
           
-          // Нет позиции и нет открытых ордеров — ордера отменены
-          if (allCanceledOrExpired || notOpen.length === entryIds.length) {
-            book.set(task, "canceled");
-            const msg = `🚫 Задача #${task.id} ${symbol} отменена (entry ордера сняты)`;
-            log(msg);
-            notify?.(msg); // ✅ НОВОЕ: Отправляем в Telegram
-            continue;
-          }
+          // ✅ КРИТИЧНО: Нет позиции И нет открытых entry ордеров → task отменён
+          // Это работает и для Algo Orders (STOP_MARKET entry) которые не находятся в fetchOrdersStatus
+          // Логика простая: если ордеров нет и позиции нет — значит всё отменено
+          book.set(task, "canceled");
+          book.remove(task.id);
+          const msg = `🚫 Задача #${task.id} ${symbol} отменена (entry ордера сняты, позиции нет)`;
+          log(msg);
+          notify?.(msg);
           
         } catch (e: any) {
           // Не ломаем recovery если одна задача упала
