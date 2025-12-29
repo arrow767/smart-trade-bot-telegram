@@ -71,6 +71,39 @@ const TASK_CHAINING_ENABLED = String(process.env.TASK_CHAINING_ENABLED || "true"
   || String(process.env.TASK_CHAINING_ENABLED || "true") === "1";
 
 /**
+ * ✅ КРИТИЧНО: Снять ВСЕ ордера по символу (entry, SL, TP, лимитки, стопы)
+ * Вызывается при отмене задачи для гарантии чистого состояния
+ */
+async function cancelAllOrdersForSymbol(ex: BinanceFutures, symbolCcxt: string): Promise<void> {
+  try {
+    // 1. Снимаем все обычные ордера
+    const openOrders = await ex.fetchOpenOrders(symbolCcxt, { force: true });
+    for (const o of openOrders) {
+      try {
+        await ex.cancelOrder(symbolCcxt, String(o.id));
+      } catch {}
+    }
+    
+    // 2. Снимаем все Algo ордера (SL/TP)
+    try {
+      const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+      for (const o of algoOrders) {
+        const algoId = o.algoId || o.orderId || o.id;
+        if (algoId) {
+          try {
+            await ex.cancelAlgoOrder(symbolCcxt, String(algoId));
+          } catch {}
+        }
+      }
+    } catch {}
+    
+    console.log(`[CANCEL] Все ордера по ${symbolCcxt} сняты`);
+  } catch (e: any) {
+    console.warn(`[CANCEL] Ошибка снятия ордеров по ${symbolCcxt}: ${e?.message || e}`);
+  }
+}
+
+/**
  * ✅ НОВОЕ: Обработка логики цепочки задач.
  * Когда task переходит в live, проверяем есть ли старые live задачи на том же символе
  * в том же направлении с ценой "против профита". Если есть — отменяем их и пересчитываем SL/TP.
@@ -660,30 +693,47 @@ export async function runCommand(
       info(mode === "console" ? `Задача #${parsed.id} не найдена.` : `<b>Нет задачи #${parsed.id}</b>`);
       return;
     }
-    try {
-      const keep = new Set(t.entryOrderIds || []);
-      await cancelBracketOnly(ex, t.symbolCcxt, keep).catch(() => {});
-      for (const id of keep) {
-        await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
-      }
-    } catch {}
+    // ✅ КРИТИЧНО: Снимаем ВСЕ ордера по символу (лимитки, стопы, entry, SL, TP)
+    await cancelAllOrdersForSymbol(ex, t.symbolCcxt);
     book.remove(t.id);
-    info(mode === "console" ? `Удалил задачу #${parsed.id}.` : `<b>Удалил задачу #${parsed.id}</b>`);
+    info(mode === "console" ? `Удалил задачу #${parsed.id}, все ордера по ${t.symbolCcxt} сняты.` : `<b>Удалил задачу #${parsed.id}</b>\nВсе ордера по ${t.symbolCcxt} сняты.`);
+    return;
+  }
+
+  // ✅ НОВОЕ: cancel <ticker> — отменить все задачи по тикеру
+  if (parsed.kind === "cancel_ticker") {
+    const { symbol } = parsed;
+    const tasks = book.list().filter(t => t.symbolCcxt === symbol);
+    if (tasks.length === 0) {
+      info(mode === "console" ? `Нет задач по ${symbol}.` : `<b>Нет задач по ${symbol}</b>`);
+      return;
+    }
+    // ✅ КРИТИЧНО: Снимаем ВСЕ ордера по символу
+    await cancelAllOrdersForSymbol(ex, symbol);
+    // Удаляем все задачи по символу
+    for (const t of tasks) {
+      book.remove(t.id);
+    }
+    const ids = tasks.map(t => `#${t.id}`).join(", ");
+    info(mode === "console" ? `Удалено ${tasks.length} задач по ${symbol}: ${ids}. Все ордера сняты.` : `<b>Удалено ${tasks.length} задач по ${symbol}</b>\n${ids}\nВсе ордера сняты.`);
     return;
   }
 
   if (parsed.kind === "cancel_all") {
+    // Собираем все символы
+    const symbols = new Set<string>();
     for (const t of book.list()) {
-      try {
-        const keep = new Set(t.entryOrderIds || []);
-        await cancelBracketOnly(ex, t.symbolCcxt, keep).catch(() => {});
-        for (const id of keep) {
-          await ex.cancelOrder(t.symbolCcxt, id).catch(() => {});
-        }
-      } catch {}
+      symbols.add(t.symbolCcxt);
+    }
+    // ✅ КРИТИЧНО: Снимаем ВСЕ ордера по всем символам
+    for (const sym of symbols) {
+      await cancelAllOrdersForSymbol(ex, sym);
+    }
+    // Удаляем все задачи
+    for (const t of book.list()) {
       book.remove(t.id);
     }
-    info(mode === "console" ? `Все задачи удалены.` : `<b>Все задачи удалены</b>`);
+    info(mode === "console" ? `Все задачи удалены, все ордера сняты.` : `<b>Все задачи удалены</b>\nВсе ордера сняты.`);
     return;
   }
 

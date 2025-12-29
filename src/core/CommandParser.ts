@@ -153,7 +153,17 @@ export function parseLine(line: string): ParsedCmd | null {
   }
 
   // --- стандартные команды ---
-  if (cmd === "cancel" && p[1]) return { kind: "cancel", id: Number(p[1]) };
+  if (cmd === "cancel" && p[1]) {
+    // ✅ НОВОЕ: Если аргумент — число, отменяем по ID. Иначе — по тикеру.
+    const arg = p[1];
+    if (/^\d+$/.test(arg)) {
+      return { kind: "cancel", id: Number(arg) };
+    } else {
+      // cancel xrp → отменить все задачи по XRP
+      const { symbolCcxt } = normalizeTickerToUsdt(arg);
+      return { kind: "cancel_ticker", symbol: symbolCcxt };
+    }
+  }
   if (cmd === "cancel-all") return { kind: "cancel_all" };
   if (cmd === "close" && p[idx+1]) {
     const symbol = p[idx+1];
