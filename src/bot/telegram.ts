@@ -427,19 +427,46 @@ bot.action("TASKS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     await ctx.answerCbQuery();
-    // ✅ ИСПРАВЛЕНО: Используем runCommand для консистентности
-    // Так tasks будет одинаково работать из inline кнопки и reply keyboard
-    await runCommand(ex, book, { kind:"tasks" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
     
-    // Дополнительно показываем кнопки Cancel для каждой задачи
-    const rows = book.list();
-    if (rows.length > 0) {
-      for (const t of rows) {
+    // ✅ КРИТИЧНО: Получаем актуальные данные из book
+    const allTasks = book.list();
+    console.log(`[DEBUG] TASKS action: book.list() = ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
+    
+    // ✅ ИСПРАВЛЕНО: РЕДАКТИРУЕМ текущее сообщение вместо отправки нового
+    // Это гарантирует что пользователь видит актуальные данные
+    let tasksText: string;
+    if (allTasks.length === 0) {
+      tasksText = "Нет активных задач.";
+    } else {
+      const lines: string[] = [];
+      for (const t of allTasks) {
+        const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
+        const shortSym = t.symbolCcxt.replace("/USDT:USDT", "").replace("/USDT", "");
+        lines.push(`#${t.id} [${t.status}] ${shortSym}`);
+        lines.push(`  ${created}`);
+        lines.push(`  ${t.label}`);
+        if (t.error) lines.push(`  ⚠️ ${t.error}`);
+      }
+      tasksText = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+    }
+    
+    // Пробуем отредактировать сообщение
+    try {
+      await ctx.editMessageText(tasksText, { parse_mode: "HTML", ...mainKb });
+    } catch (editErr: any) {
+      // Если не удалось отредактировать (например, сообщение слишком старое) - отправляем новое
+      console.log(`[DEBUG] TASKS: не удалось отредактировать сообщение, отправляю новое: ${editErr?.message}`);
+      await ctx.reply(tasksText, { parse_mode: "HTML", ...mainKb });
+    }
+    
+    // Показываем кнопки Cancel для каждой задачи
+    if (allTasks.length > 0) {
+      for (const t of allTasks) {
         const kb = Markup.inlineKeyboard([
-          [ Markup.button.callback(`Cancel #${t.id}`, `CANCEL|${t.id}`) ]
+          [ Markup.button.callback(`❌ Cancel #${t.id}`, `CANCEL|${t.id}`) ]
         ]);
         await ctx.reply(
-          `🗑 Отменить задачу #${t.id}?`,
+          `🗑 Отменить #${t.id} ${t.symbolCcxt.replace("/USDT:USDT", "")}?`,
           { parse_mode:"HTML", ...kb }
         );
       }
