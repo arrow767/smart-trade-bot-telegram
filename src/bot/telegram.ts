@@ -407,33 +407,14 @@ bot.hears("💰 Deposit", async (ctx)=>{
 bot.hears("🧰 Tasks", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    
-    // ✅ ПРОСТАЯ ЛОГИКА: Напрямую получаем задачи и отправляем
-    const allTasks = book.list();
-    const taskIds = allTasks.map(t => `#${t.id}`).join(", ") || "нет";
-    console.log(`[TASKS] Кнопка нажата → ${allTasks.length} задач: ${taskIds}`);
-    
-    let text: string;
-    if (allTasks.length === 0) {
-      text = "Нет активных задач.";
-    } else {
-      const lines: string[] = [];
-      for (const t of allTasks) {
-        const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
-        const shortSym = t.symbolCcxt.replace("/USDT:USDT", "").replace("/USDT", "");
-        lines.push(`#${t.id} [${t.status}] ${shortSym}  ${created}  ${t.label}`);
-        if (t.error) lines.push(`  ⚠️ ${t.error}`);
-      }
-      text = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
-    }
-    
-    // ✅ ПРЯМАЯ ОТПРАВКА без safeReply и дедупликации
-    await ctx.reply(text, { parse_mode: "HTML" });
-    console.log(`[TASKS] Сообщение отправлено в Telegram`);
-    
+    // ✅ Используем runCommand для единого форматирования
+    await runCommand(ex, book, { kind:"tasks" }, 
+      (m) => ctx.reply(m, { parse_mode:"HTML" }), 
+      (m) => ctx.reply(m, { parse_mode:"HTML" }), 
+      "telegram"
+    );
   } catch (e:any) {
-    console.error("[TASKS] Ошибка:", e);
-    try { await ctx.reply(`Ошибка: ${e?.message || e}`); } catch {}
+    console.error("Tasks error:", e);
   }
 });
 
@@ -451,33 +432,14 @@ bot.action("TASKS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     await ctx.answerCbQuery();
-    
-    // ✅ ПРОСТАЯ ЛОГИКА: Напрямую получаем задачи
-    const allTasks = book.list();
-    const taskIds = allTasks.map(t => `#${t.id}`).join(", ") || "нет";
-    console.log(`[TASKS inline] Кнопка нажата → ${allTasks.length} задач: ${taskIds}`);
-    
-    let text: string;
-    if (allTasks.length === 0) {
-      text = "Нет активных задач.";
-    } else {
-      const lines: string[] = [];
-      for (const t of allTasks) {
-        const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
-        const shortSym = t.symbolCcxt.replace("/USDT:USDT", "").replace("/USDT", "");
-        lines.push(`#${t.id} [${t.status}] ${shortSym}  ${created}  ${t.label}`);
-        if (t.error) lines.push(`  ⚠️ ${t.error}`);
-      }
-      text = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
-    }
-    
-    // ✅ ПРЯМАЯ ОТПРАВКА - всегда новое сообщение
-    await ctx.reply(text, { parse_mode: "HTML", ...mainKb });
-    console.log(`[TASKS inline] Сообщение отправлено в Telegram`);
-    
+    // ✅ Используем runCommand для единого форматирования
+    await runCommand(ex, book, { kind:"tasks" }, 
+      (m) => ctx.reply(m, { parse_mode:"HTML", ...mainKb }), 
+      (m) => ctx.reply(m, { parse_mode:"HTML" }), 
+      "telegram"
+    );
   } catch (e:any) {
-    console.error("[TASKS inline] Ошибка:", e);
-    try { await ctx.reply(`Ошибка: ${e?.message || e}`); } catch {}
+    console.error("TASKS action error:", e);
   }
 });
 

@@ -130,10 +130,55 @@ export class TaskBook {
   }
 
   list() {
+    // ✅ КРИТИЧНО: Перечитываем с диска перед выводом списка
+    // Это гарантирует актуальные данные если несколько процессов работают с одним файлом
+    this.reloadFromDisk();
     return Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
   }
 
+  /** ✅ НОВОЕ: Перечитать данные с диска (для синхронизации между процессами) */
+  private reloadFromDisk() {
+    try {
+      if (!fs.existsSync(TASKS_JSON)) return;
+      const raw = JSON.parse(fs.readFileSync(TASKS_JSON, "utf-8")) as any[];
+      
+      // Очищаем текущие данные и загружаем заново
+      this.tasks.clear();
+      for (const o of raw || []) {
+        const t: Task = {
+          id: Number(o.id),
+          symbolCcxt: String(o.symbolCcxt),
+          label: String(o.label),
+          status: String(o.status) as TaskStatus,
+          error: o.error ? String(o.error) : undefined,
+          startedAt: new Date(o.startedAt),
+          updatedAt: new Date(o.updatedAt),
+          entryOrderIds: Array.isArray(o.entryOrderIds) ? o.entryOrderIds.map(String) : [],
+          cancelRequested: !!o.cancelRequested,
+          side: (o.side === "long" || o.side === "short") ? o.side : undefined,
+          totalUsd: Number(o.totalUsd || 0) || undefined,
+          presetName: o.presetName ? String(o.presetName) : undefined,
+          riskUsd: Number(o.riskUsd || 0) || undefined,
+          taskEntryAvg: Number(o.taskEntryAvg || 0) || undefined,
+          taskEntryQty: Number(o.taskEntryQty || 0) || undefined,
+          supersededBy: Number(o.supersededBy || 0) || undefined,
+          noPreset: o.noPreset === true || o.noPreset === "true",
+        };
+        this.tasks.set(t.id, t);
+      }
+      
+      // Обновляем последовательность ID
+      for (const id of this.tasks.keys()) {
+        TASK_ID_SEQ = Math.max(TASK_ID_SEQ, id + 1);
+      }
+    } catch (e: any) {
+      // Молча игнорируем ошибки чтения — используем данные в памяти
+    }
+  }
+
   get(id: number) {
+    // ✅ Перечитываем с диска для актуальных данных
+    this.reloadFromDisk();
     return this.tasks.get(id);
   }
 
