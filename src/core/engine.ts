@@ -66,6 +66,139 @@ const MAX_ENTRY_DISTANCE_PCT = Number(process.env.MAX_ENTRY_DISTANCE_PCT || 15);
 // ✅ НОВОЕ: Автоочистка tasks со status=error старше N дней
 const AUTO_CLEANUP_ERROR_TASKS_DAYS = Number(process.env.AUTO_CLEANUP_ERROR_TASKS_DAYS || 3);
 
+// ✅ НОВОЕ: Включить логику цепочки задач (task chaining)
+const TASK_CHAINING_ENABLED = String(process.env.TASK_CHAINING_ENABLED || "true").toLowerCase() === "true" 
+  || String(process.env.TASK_CHAINING_ENABLED || "true") === "1";
+
+/**
+ * ✅ НОВОЕ: Обработка логики цепочки задач.
+ * Когда task переходит в live, проверяем есть ли старые live задачи на том же символе
+ * в том же направлении с ценой "против профита". Если есть — отменяем их и пересчитываем SL/TP.
+ * 
+ * @param ex - биржевой клиент
+ * @param book - книга задач
+ * @param newTask - новая задача, которая переходит в live
+ * @param newTaskEntryAvg - средняя цена входа новой задачи
+ * @param newTaskEntryQty - объём входа новой задачи
+ * @param totalPositionQty - общий объём позиции на бирже
+ * @param mark - текущая цена (mark price)
+ * @param log - функция логирования
+ * @returns true если цепочка была обработана (старые задачи отменены)
+ */
+async function handleTaskChaining(
+  ex: BinanceFutures,
+  book: TaskBook,
+  newTask: { id: number; symbolCcxt: string; side: "long" | "short"; presetName?: string; riskUsd?: number },
+  newTaskEntryAvg: number,
+  newTaskEntryQty: number,
+  totalPositionQty: number,
+  mark: number,
+  log: (msg: string) => void
+): Promise<{ chainHandled: boolean; supersededTaskIds: number[] }> {
+  if (!TASK_CHAINING_ENABLED) {
+    return { chainHandled: false, supersededTaskIds: [] };
+  }
+
+  const { symbolCcxt, side, id: newTaskId } = newTask;
+  
+  // Получаем старые активные задачи на том же символе в том же направлении
+  const olderTasks = book.getOlderActiveTasksForSymbolSide(symbolCcxt, side, newTaskId);
+  
+  if (olderTasks.length === 0) {
+    return { chainHandled: false, supersededTaskIds: [] };
+  }
+
+  // Проверяем условие "в сторону профита":
+  // Для LONG: новая цена входа ВЫШЕ старой
+  // Для SHORT: новая цена входа НИЖЕ старой
+  const supersededTaskIds: number[] = [];
+  
+  for (const oldTask of olderTasks) {
+    const oldEntryAvg = oldTask.taskEntryAvg || 0;
+    if (oldEntryAvg <= 0) continue; // нет данных о входе
+    
+    const isProfitDirection = side === "long" 
+      ? newTaskEntryAvg > oldEntryAvg 
+      : newTaskEntryAvg < oldEntryAvg;
+    
+    if (!isProfitDirection) continue;
+    
+    // Цепочка! Отменяем старую задачу
+    log(`🔗 Цепочка: task #${newTaskId} supersedes task #${oldTask.id} (${side}, ${oldEntryAvg} → ${newTaskEntryAvg})`);
+    
+    // Снимаем SL/TP старой задачи (bracket)
+    const keepIds = new Set((oldTask.entryOrderIds || []).map(String));
+    try {
+      await cancelBracketOnly(ex, symbolCcxt, keepIds);
+    } catch (e: any) {
+      console.warn(`[WARN] Failed to cancel bracket for old task #${oldTask.id}: ${e?.message}`);
+    }
+    
+    // Помечаем как superseded
+    book.supersede(oldTask.id, newTaskId);
+    supersededTaskIds.push(oldTask.id);
+  }
+  
+  if (supersededTaskIds.length === 0) {
+    return { chainHandled: false, supersededTaskIds: [] };
+  }
+  
+  // Теперь выставляем новые SL/TP для новой задачи
+  // SL: от средней цены НОВОЙ task, на риск = preset.trade_risk, на объём ТОЛЬКО новой task
+  // TP: от средней цены НОВОЙ task, на весь объём позиции
+  
+  try {
+    const preset = await getPreset(newTask.presetName || DEFAULT_PRESET);
+    const filters = ex.getSymbolFilters(symbolCcxt);
+    const sideExit = side === "long" ? "sell" : "buy";
+    
+    // Риск: берём из task.riskUsd или из preset
+    const baseRisk = (typeof newTask.riskUsd === "number" && Number.isFinite(newTask.riskUsd) && newTask.riskUsd > 0)
+      ? newTask.riskUsd
+      : preset.trade_risk;
+    
+    // ✅ КЛЮЧЕВОЕ: SL рассчитываем на объём ТОЛЬКО новой task
+    const desiredSL = calcDesiredSLByRiskUsd(side, newTaskEntryAvg, newTaskEntryQty, baseRisk);
+    const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
+    const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
+    const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
+    
+    if (Number.isFinite(safeSL) && safeSL > 0) {
+      // Сначала снимаем все SL
+      await cancelOnlySL(ex, symbolCcxt, new Set()).catch(() => {});
+      // Выставляем новый SL
+      await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+      log(`🔗 Цепочка: новый SL @ ${safeSL} (от ${newTaskEntryAvg}, risk=$${baseRisk}, qty=${fmtQty5(newTaskEntryQty)})`);
+    }
+    
+    // ✅ КЛЮЧЕВОЕ: TP рассчитываем на ВЕСЬ объём позиции
+    const positionUsd = totalPositionQty * newTaskEntryAvg;
+    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd, preset });
+    
+    let tpQtys = splitQtyToStep(totalPositionQty, preset.take_profit_ratio, filters.stepSize);
+    tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
+    tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+    
+    let tpPlacedCount = 0;
+    for (let i = 0; i < re.tpPrices.length; i++) {
+      const q = tpQtys[i];
+      if (q <= 0) continue;
+      const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+      await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
+      tpPlacedCount++;
+    }
+    
+    if (tpPlacedCount > 0) {
+      log(`🔗 Цепочка: новые TP выставлены (${tpPlacedCount} ордеров, от ${newTaskEntryAvg}, totalQty=${fmtQty5(totalPositionQty)})`);
+    }
+    
+  } catch (e: any) {
+    console.error(`[ERROR] handleTaskChaining failed to place SL/TP: ${e?.message}`);
+  }
+  
+  return { chainHandled: true, supersededTaskIds };
+}
+
 export async function runCommand(
   ex: BinanceFutures,
   book: TaskBook,
@@ -788,6 +921,7 @@ export async function runCommand(
         let lastSize = 0;
         let lastAvg = 0;
         let tpsPlaced = false;
+        let tpMessageSent = false; // ✅ НОВОЕ: сообщение о TP уже отправлено
         let slPxCurrent: number | undefined;
         let planSent = false; // ✅ Флаг: план уже отправлен
         const tpIndexById = new Map<string, number>();
@@ -819,7 +953,20 @@ export async function runCommand(
           return code === -4130 || /-4130/.test(msg) || (/closePosition/i.test(msg) && /existing/i.test(msg));
         };
 
+        // ✅ НОВОЕ: Счетчик временных ошибок для MARKET цикла
+        let tempErrorCountMarket = 0;
+        const MAX_TEMP_ERRORS_MARKET = 3;
+        
         for (;;) {
+          // ✅ КРИТИЧНО: Если задача удалена из book (например через cancel) — выходим из цикла
+          if (!book.get(task.id)) {
+            if (mode === "console") {
+              console.log(`[DEBUG] Task #${task.id} no longer exists in book, exiting MARKET loop`);
+            }
+            return;
+          }
+          
+          try {
           const tick = await ex.fetchTicker(symbolCcxt);
           const mark = Number(tick.last ?? tick.mark ?? tick.info?.markPrice);
 
@@ -838,7 +985,8 @@ export async function runCommand(
 
           // Если пользователь снял SL/TP руками — сбрасываем флаги, чтобы довыставить заново
           if (!hasSLNow) slPxCurrent = undefined;
-          if (!hasTPNow) tpsPlaced = false;
+          // ✅ ИСПРАВЛЕНО: НЕ сбрасываем tpsPlaced если сообщение уже было отправлено
+          if (!hasTPNow && !tpMessageSent) tpsPlaced = false;
 
           const delta = posSize - lastSize;
           const increased = delta > 1e-9;
@@ -881,20 +1029,25 @@ export async function runCommand(
               }
 
               // TP ставим только если их реально нет
-              if (!hasTPNow) {
+              if (!hasTPNow && !tpsPlaced) {
                 const planningPreset = { ...preset, trade_risk: baseRisk } as any;
                 const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                let tpPlacedCount = 0;
                 for (let i = 0; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0) continue;
                   const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
                   const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
-                  if (ord?.id) tpIndexById.set(String(ord.id), i + 1);
+                  if (ord?.id) {
+                    tpIndexById.set(String(ord.id), i + 1);
+                    tpPlacedCount++;
+                  }
                 }
                 tpsPlaced = true;
+                tpMessageSent = true; // ✅ Помечаем что сообщение уже отправлено
 
                 // ✅ Отправляем план только один раз
                 if (!planSent) {
@@ -957,12 +1110,39 @@ export async function runCommand(
             }
           }
 
+          // Сбрасываем счётчик при успешной итерации
+          tempErrorCountMarket = 0;
+          
+          } catch (cycleErr: any) {
+            // ✅ НОВОЕ: Обработка временных ошибок в MARKET цикле
+            const errMsg = String(cycleErr?.message || cycleErr || "");
+            const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) ||
+                                cycleErr?.code === -1000 || cycleErr?.code === -1007;
+            
+            if (isTemporary) {
+              tempErrorCountMarket++;
+              if (tempErrorCountMarket % MAX_TEMP_ERRORS_MARKET === 1) {
+                console.warn(`[WARN] Temporary error in MARKET task #${task.id}: ${errMsg.slice(0, 100)}`);
+              }
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+            throw cycleErr;
+          }
+          
           await new Promise((r) => setTimeout(r, 1000));
         }
       } catch (err: any) {
         const t = book.get(task.id);
         if (t) book.set(t, "error", err?.message ?? err);
-        info(`❌ [ERROR] ${err?.message ?? err}`);
+        // ✅ ИСПРАВЛЕНО: Не отправляем временные ошибки в Telegram
+        const errMsg = String(err?.message || err || "");
+        const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg);
+        if (!isTemporary) {
+          info(`❌ [ERROR] ${errMsg}`);
+        } else {
+          console.error(`[ERROR] MARKET task #${task.id} failed: ${errMsg}`);
+        }
       }
     })();
 
@@ -1088,9 +1268,15 @@ export async function runCommand(
       let lastSize = 0;
       let lastAvg = 0;
       let tpsPlaced = false;
+      let tpMessageSent = false; // ✅ НОВОЕ: отправлено ли сообщение о TP (отдельно от tpsPlaced)
       let slPxCurrent: number | undefined;
       let planSent = false; // ✅ Флаг: план уже отправлен в Telegram
       const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
+      
+      // ✅ НОВОЕ: Отслеживание входа ЭТОЙ task для логики цепочки
+      let taskFilledQty = 0; // Объём, набранный этой task
+      let taskFilledValue = 0; // Сумма (qty * price) для расчёта средней
+      let chainHandled = false; // Флаг: логика цепочки уже обработана
 
         const hasClosePositionConditional = (orders: any[]) => {
           for (const o of orders || []) {
@@ -1124,8 +1310,21 @@ export async function runCommand(
       let lastCleanupTs = Date.now();
       const CLEANUP_INTERVAL_MS = 30_000;
 
+      // ✅ НОВОЕ: Счетчик временных ошибок для throttling
+      let tempErrorCount = 0;
+      const MAX_TEMP_ERRORS_BEFORE_LOG = 3; // Логируем только каждую N-ую временную ошибку
+      
       for (;;) {
-        if (book.get(task.id)?.cancelRequested) {
+        // ✅ КРИТИЧНО: Если задача удалена из book (например через cancel) — выходим из цикла
+        const currentTask = book.get(task.id);
+        if (!currentTask) {
+          if (mode === "console") {
+            console.log(`[DEBUG] Task #${task.id} no longer exists in book, exiting LIMIT/STOP loop`);
+          }
+          return;
+        }
+        
+        if (currentTask.cancelRequested) {
           await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
           for (const id of keep) {
             await ex.cancelOrder(task.symbolCcxt, id).catch(() => {});
@@ -1134,6 +1333,9 @@ export async function runCommand(
           return;
         }
 
+        // ✅ НОВОЕ: Обёртка для обработки временных ошибок
+        // Timeout/network ошибки НЕ должны ронять задачу
+        try {
         // ✅ НОВОЕ: Периодическая очистка висячих tasks
         const now = Date.now();
         if (now - lastCleanupTs > CLEANUP_INTERVAL_MS) {
@@ -1389,6 +1591,27 @@ export async function runCommand(
         const increased = delta > 1e-9;
         const decreased = delta < -1e-9;
 
+        // ✅ НОВОЕ: Обновляем данные о входе этой task при увеличении позиции
+        if (increased && entryAvg > 0) {
+          // Предполагаем что увеличение позиции произошло по цене entryAvg (средней позиции)
+          // Это приближение, т.к. мы не знаем точную цену исполнения каждой отложки
+          const newQty = delta;
+          const newValue = newQty * entryAvg;
+          taskFilledQty += newQty;
+          taskFilledValue += newValue;
+          
+          // Сохраняем в task для персистентности
+          const taskEntryAvgCalc = taskFilledValue / taskFilledQty;
+          const tt = book.get(task.id);
+          if (tt) {
+            book.updateTaskEntry(tt, entryAvg, newQty);
+          }
+          
+          if (mode === "console") {
+            console.log(`[DEBUG] Task #${task.id} entry updated: qty=${fmtQty5(taskFilledQty)}, avg=${taskEntryAvgCalc.toFixed(4)}`);
+          }
+        }
+
         // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
         // Если позиция есть (posSize > 0) и TP/SL не выставлены → выставляем их
         // Не зависим от lastSize, increased и других сложных условий
@@ -1407,7 +1630,11 @@ export async function runCommand(
         const hasSLNow = hasClosePositionConditional(allOpenOrders);
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
-        if (!hasTPNow) tpsPlaced = false;
+        // ✅ ИСПРАВЛЕНО: НЕ сбрасываем tpsPlaced если он уже был установлен
+        // Это предотвращает спам "TP выставлены: 0 ордеров"
+        // tpsPlaced сбрасывается только если TP были сняты ВРУЧНУЮ (hasTPNow было true, стало false)
+        // Но если tpMessageSent = true, значит мы уже отправили сообщение и не нужно спамить
+        if (!hasTPNow && !tpMessageSent) tpsPlaced = false;
 
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
@@ -1501,25 +1728,39 @@ export async function runCommand(
                 let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                
+                let tpPlacedCount = 0;
                 for (let i = 0; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0) continue;
                   const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
                   const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
-                  if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
+                  if (ord?.id) {
+                    tpIndexById.set(String(ord.id), i + 1);
+                    tpPlacedCount++;
+                  }
                 }
                 tpsPlaced = true;
-                info(mode === "console" 
-                  ? `✅ TP выставлены: ${re.tpPrices.length} ордеров`
-                  : `<b>✅ TP выставлены:</b> ${re.tpPrices.length} ордеров`
-                );
+                tpMessageSent = true; // ✅ Помечаем что сообщение отправлено
+                
+                // ✅ ИСПРАВЛЕНО: НЕ отправляем сообщение если выставлено 0 ордеров
+                if (tpPlacedCount > 0) {
+                  info(mode === "console" 
+                    ? `✅ TP выставлены: ${tpPlacedCount} ордеров`
+                    : `<b>✅ TP выставлены:</b> ${tpPlacedCount} ордеров`
+                  );
+                }
               } catch (e: any) {
                 console.error(`Failed to place TP: ${e?.message || e}`);
                 const errMsg = String(e?.message || e || "Unknown error");
-                info(mode === "console" 
-                  ? `⚠️ Ошибка выставления TP: ${errMsg}`
-                  : `<b>⚠️ Ошибка выставления TP:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
-                );
+                // ✅ ИСПРАВЛЕНО: Не спамим ошибками если это временная проблема
+                const isTemporary = /timeout|network|timed out|ETIMEDOUT|ECONNRESET/i.test(errMsg);
+                if (!isTemporary) {
+                  info(mode === "console" 
+                    ? `⚠️ Ошибка выставления TP: ${errMsg}`
+                    : `<b>⚠️ Ошибка выставления TP:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                  );
+                }
               }
             }
 
@@ -1556,7 +1797,50 @@ export async function runCommand(
           lastAvg = entryAvg;
           if (entriesLeft === 0) {
             const tt = book.get(task.id);
-            if (tt) book.set(tt, "live");
+            if (tt) {
+              book.set(tt, "live");
+              
+              // ✅ НОВОЕ: Логика цепочки задач при переходе в live
+              if (!chainHandled && !noPreset && tt.side && taskFilledQty > 0) {
+                const taskEntryAvgCalc = taskFilledValue / taskFilledQty;
+                try {
+                  const chainResult = await handleTaskChaining(
+                    ex,
+                    book,
+                    { 
+                      id: tt.id, 
+                      symbolCcxt: tt.symbolCcxt, 
+                      side: tt.side, 
+                      presetName: tt.presetName,
+                      riskUsd: tt.riskUsd
+                    },
+                    taskEntryAvgCalc,
+                    taskFilledQty,
+                    posSize,
+                    mark,
+                    (m) => info(mode === "console" ? m : `<b>${m}</b>`)
+                  );
+                  
+                  if (chainResult.chainHandled) {
+                    chainHandled = true;
+                    // SL/TP уже выставлены в handleTaskChaining
+                    tpsPlaced = true;
+                    tpMessageSent = true;
+                    slPxCurrent = 1; // Помечаем что SL есть (точное значение не важно)
+                    planSent = true;
+                    
+                    if (chainResult.supersededTaskIds.length > 0) {
+                      info(mode === "console" 
+                        ? `🔗 Цепочка: задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
+                        : `<b>🔗 Цепочка:</b> задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
+                      );
+                    }
+                  }
+                } catch (e: any) {
+                  console.error(`[ERROR] handleTaskChaining failed: ${e?.message}`);
+                }
+              }
+            }
           } else {
             const tt = book.get(task.id);
             if (tt) book.set(tt, lastSize > 0 ? "filled" : "waiting_fill");
@@ -1651,6 +1935,31 @@ export async function runCommand(
           }
         }
 
+        // Сбрасываем счётчик временных ошибок при успешной итерации
+        tempErrorCount = 0;
+        
+        } catch (cycleErr: any) {
+          // ✅ НОВОЕ: Обработка временных ошибок внутри цикла
+          const errMsg = String(cycleErr?.message || cycleErr || "");
+          const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) ||
+                              cycleErr?.code === -1000 || // Binance Unknown error
+                              cycleErr?.code === -1007;   // Execution status unknown
+          
+          if (isTemporary) {
+            tempErrorCount++;
+            // Логируем только каждую N-ую ошибку чтобы не спамить
+            if (tempErrorCount % MAX_TEMP_ERRORS_BEFORE_LOG === 1) {
+              console.warn(`[WARN] Temporary error in task #${task.id} tracking loop (count=${tempErrorCount}): ${errMsg.slice(0, 100)}`);
+            }
+            // Продолжаем цикл после короткой паузы
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+          
+          // Не временная ошибка — пробрасываем наверх
+          throw cycleErr;
+        }
+        
         // ✅ Увеличена частота проверки до 2.5 секунд для более быстрого детектирования
         await new Promise((r) => setTimeout(r, 2500));
       }
@@ -1660,7 +1969,14 @@ export async function runCommand(
         t.error = err?.message ?? err;
         t.updatedAt = new Date();
       }
-      info(`❌ [ERROR] ${err?.message ?? err}`);
+      // ✅ ИСПРАВЛЕНО: Не отправляем временные ошибки в Telegram
+      const errMsg = String(err?.message || err || "");
+      const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg);
+      if (!isTemporary) {
+        info(`❌ [ERROR] ${errMsg}`);
+      } else {
+        console.error(`[ERROR] Task #${task.id} failed with temporary error: ${errMsg}`);
+      }
     }
   })();
 

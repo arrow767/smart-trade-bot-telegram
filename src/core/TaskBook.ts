@@ -79,6 +79,10 @@ export class TaskBook {
           totalUsd: Number(o.totalUsd || 0) || undefined,
           presetName: o.presetName ? String(o.presetName) : undefined,
           riskUsd: Number(o.riskUsd || 0) || undefined,
+          // ✅ НОВОЕ: поля для логики цепочки
+          taskEntryAvg: Number(o.taskEntryAvg || 0) || undefined,
+          taskEntryQty: Number(o.taskEntryQty || 0) || undefined,
+          supersededBy: Number(o.supersededBy || 0) || undefined,
         };
         this.tasks.set(t.id, t);
       }
@@ -151,6 +155,79 @@ export class TaskBook {
   /** ✅ НОВОЕ: Получить все задачи по символу */
   getBySymbol(symbolCcxt: string): Task[] {
     return Array.from(this.tasks.values()).filter(t => t.symbolCcxt === symbolCcxt);
+  }
+
+  /** ✅ НОВОЕ: Установить среднюю цену и объём входа для задачи */
+  setTaskEntry(t: Task, avg: number, qty: number) {
+    t.taskEntryAvg = avg;
+    t.taskEntryQty = qty;
+    t.updatedAt = new Date();
+    this.save();
+  }
+
+  /** ✅ НОВОЕ: Обновить данные входа задачи (добавить к существующим) */
+  updateTaskEntry(t: Task, newAvg: number, newQty: number) {
+    const oldAvg = t.taskEntryAvg || 0;
+    const oldQty = t.taskEntryQty || 0;
+    
+    if (oldQty > 0 && newQty > 0) {
+      // Рассчитываем новую среднюю
+      const totalQty = oldQty + newQty;
+      const totalValue = oldAvg * oldQty + newAvg * newQty;
+      t.taskEntryAvg = totalValue / totalQty;
+      t.taskEntryQty = totalQty;
+    } else if (newQty > 0) {
+      t.taskEntryAvg = newAvg;
+      t.taskEntryQty = newQty;
+    }
+    
+    t.updatedAt = new Date();
+    this.save();
+  }
+
+  /** 
+   * ✅ НОВОЕ: Получить активную задачу по символу и направлению.
+   * Возвращает задачу со статусом live/filled/waiting_fill, 
+   * которая НЕ была superseded.
+   */
+  getActiveTaskForSymbolSide(symbolCcxt: string, side: "long" | "short"): Task | undefined {
+    const activeStatuses: TaskStatus[] = ["live", "filled", "waiting_fill", "placing_bracket"];
+    return Array.from(this.tasks.values())
+      .filter(t => 
+        t.symbolCcxt === symbolCcxt && 
+        t.side === side && 
+        activeStatuses.includes(t.status) &&
+        !t.supersededBy
+      )
+      .sort((a, b) => b.id - a.id)[0]; // самая новая
+  }
+
+  /**
+   * ✅ НОВОЕ: Получить все активные задачи по символу и направлению,
+   * которые старше заданной задачи (для логики цепочки).
+   */
+  getOlderActiveTasksForSymbolSide(symbolCcxt: string, side: "long" | "short", newerThanTaskId: number): Task[] {
+    const activeStatuses: TaskStatus[] = ["live", "filled", "placing_bracket"];
+    return Array.from(this.tasks.values())
+      .filter(t => 
+        t.symbolCcxt === symbolCcxt && 
+        t.side === side && 
+        activeStatuses.includes(t.status) &&
+        !t.supersededBy &&
+        t.id < newerThanTaskId
+      )
+      .sort((a, b) => b.id - a.id); // от новых к старым
+  }
+
+  /** ✅ НОВОЕ: Пометить задачу как superseded (заменена более новой) */
+  supersede(oldTaskId: number, newTaskId: number) {
+    const t = this.tasks.get(oldTaskId);
+    if (t) {
+      t.supersededBy = newTaskId;
+      t.status = "canceled";
+      t.updatedAt = new Date();
+      this.save();
+    }
   }
 
   /** ✅ НОВОЕ: Получить все входные ордера по символу (для всех задач) */

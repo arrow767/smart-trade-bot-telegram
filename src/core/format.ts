@@ -466,6 +466,9 @@ export function formatTradeNotification(p: {
   preset: string;
   market?: boolean;
   noPreset?: boolean; // ✅ НОВОЕ: флаг отключения пресета
+  // ✅ НОВОЕ: информация о существующих задачах и ордерах по монете
+  existingTasks?: Array<{ id: number; status: string; side?: string; totalUsd?: number; entryPrice?: number }>;
+  existingOrders?: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean }>;
 }): string {
   const sideEmoji = p.side === "long" ? "🟢" : "🔴";
   const sideText = p.side === "long" ? "LONG" : "SHORT";
@@ -499,6 +502,30 @@ export function formatTradeNotification(p: {
     msg += `🎯 <b>Takes:</b> ${p.takes.map(t => `${t}R`).join(", ")}\n`;
     if (p.takesRatio && p.takesRatio.length > 0) {
       msg += `   <i>Распределение: ${p.takesRatio.map(r => `${r}%`).join(", ")}</i>\n`;
+    }
+  }
+  
+  // ✅ НОВОЕ: Показываем существующие задачи по монете
+  if (p.existingTasks && p.existingTasks.length > 0) {
+    msg += `\n⚠️ <b>Существующие задачи по ${p.ticker.toUpperCase()}:</b>\n`;
+    for (const t of p.existingTasks) {
+      const sideIcon = t.side === "long" ? "🟢" : t.side === "short" ? "🔴" : "⚪";
+      const usdInfo = t.totalUsd ? ` ($${formatUsd(t.totalUsd)})` : "";
+      const priceInfo = t.entryPrice ? ` @ ${t.entryPrice}` : "";
+      msg += `  ${sideIcon} #${t.id} [${t.status}]${usdInfo}${priceInfo}\n`;
+    }
+  }
+  
+  // ✅ НОВОЕ: Показываем существующие ордера по монете
+  if (p.existingOrders && p.existingOrders.length > 0) {
+    msg += `\n📋 <b>Открытые ордера по ${p.ticker.toUpperCase()}:</b>\n`;
+    for (const o of p.existingOrders) {
+      const typeEmoji = o.type.includes("STOP") ? "🛑" : o.type.includes("LIMIT") ? "📌" : "⚪";
+      const sideIcon = o.side === "buy" ? "🟢" : "🔴";
+      const priceInfo = o.stopPrice ? `@ ${o.stopPrice}` : (o.price ? `@ ${o.price}` : "");
+      const qtyInfo = o.qty ? ` (qty: ${o.qty.toFixed(4)})` : "";
+      const label = o.isEntry ? " [entry]" : (o.type.includes("STOP") ? " [SL]" : " [TP]");
+      msg += `  ${typeEmoji}${sideIcon} ${o.type}${label}: ${priceInfo}${qtyInfo}\n`;
     }
   }
   

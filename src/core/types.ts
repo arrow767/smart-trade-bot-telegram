@@ -76,6 +76,23 @@ export type Task = {
    * "3 l hype 200 28.34" → riskUsd=3
    */
   riskUsd?: number;
+  
+  /**
+   * ✅ НОВОЕ: Средняя цена входа по заявкам ЭТОЙ task (не всей позиции).
+   * Используется для расчёта SL при цепочке задач.
+   */
+  taskEntryAvg?: number;
+  
+  /**
+   * ✅ НОВОЕ: Объём входа по заявкам ЭТОЙ task.
+   * Используется для расчёта SL при цепочке задач.
+   */
+  taskEntryQty?: number;
+  
+  /**
+   * ✅ НОВОЕ: Флаг, что эта задача была отменена в рамках цепочки (superseded более новой задачей).
+   */
+  supersededBy?: number;
 };
 
 export const DEFAULT_PRESET = "4h";

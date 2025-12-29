@@ -925,16 +925,23 @@ bot.on("text", async (ctx)=>{
         const preset = await getPreset(presetNameEffective);
         const riskUsd = Number.isFinite(parsed.riskUsdOverride) && (parsed.riskUsdOverride as number) > 0 ? (parsed.riskUsdOverride as number) : preset.trade_risk;
         
+        // Получаем symbolCcxt для проверки существующих задач и ордеров
+        const { symbolCcxt } = await import("../core/SymbolResolver").then(m => m.normalizeTickerToUsdt(parsed.rawTicker));
+        await ex.loadMarkets().catch(()=>{});
+        
         let legs: Array<{ usd: number; price: number; type: "LIMIT"|"STOP"|"MARKET" }> = [];
+        let currentPrice = 0;
         
         if (parsed.market && parsed.market.usd > 0) {
           legs = [{ usd: parsed.market.usd, price: 0, type: "MARKET" }];
+          try {
+            const ticker = await ex.fetchTicker(symbolCcxt);
+            currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
+          } catch {}
         } else {
           // Получаем текущую цену для определения типа ордера
-          const { symbolCcxt } = await import("../core/SymbolResolver").then(m => m.normalizeTickerToUsdt(parsed.rawTicker));
-          await ex.loadMarkets().catch(()=>{});
           const ticker = await ex.fetchTicker(symbolCcxt);
-          const currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
+          currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
           
           const isLong = parsed.dir === "l";
           legs = parsed.legs.map((leg: any) => {
@@ -949,6 +956,70 @@ bot.on("text", async (ctx)=>{
           });
         }
         
+        // ✅ НОВОЕ: Получаем существующие задачи по монете
+        let existingTasks: Array<{ id: number; status: string; side?: string; totalUsd?: number; entryPrice?: number }> = [];
+        try {
+          const tasks = book.getBySymbol(symbolCcxt);
+          const activeStatuses = ["queued", "waiting_fill", "filled", "placing_bracket", "live"];
+          existingTasks = tasks
+            .filter(t => activeStatuses.includes(t.status))
+            .map(t => ({
+              id: t.id,
+              status: t.status,
+              side: t.side,
+              totalUsd: t.totalUsd,
+              entryPrice: t.taskEntryAvg,
+            }));
+        } catch {}
+        
+        // ✅ НОВОЕ: Получаем существующие ордера по монете
+        let existingOrders: Array<{ type: string; side: string; price?: number; qty?: number; stopPrice?: number; isEntry?: boolean }> = [];
+        try {
+          // Получаем IDs входных ордеров из всех задач
+          const entryOrderIds = new Set<string>();
+          for (const t of book.getBySymbol(symbolCcxt)) {
+            (t.entryOrderIds || []).forEach(id => entryOrderIds.add(String(id)));
+          }
+          
+          // Обычные ордера
+          const openOrders = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+          for (const o of openOrders) {
+            const orderId = String(o.id || o.info?.orderId || "");
+            const orderType = String(o.type || o.info?.type || "").toUpperCase();
+            const orderSide = String(o.side || "").toLowerCase();
+            const isEntry = entryOrderIds.has(orderId);
+            
+            existingOrders.push({
+              type: orderType,
+              side: orderSide,
+              price: Number(o.price ?? o.info?.price ?? 0) || undefined,
+              qty: Number(o.amount ?? o.info?.origQty ?? 0) || undefined,
+              stopPrice: Number(o.info?.stopPrice ?? 0) || undefined,
+              isEntry,
+            });
+          }
+          
+          // Algo ордера (SL/TP)
+          try {
+            const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+            for (const ao of algoOrders) {
+              const algoId = String(ao.algoId || ao.orderId || "");
+              const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
+              const orderSide = String(ao.side || "").toLowerCase();
+              const isEntry = entryOrderIds.has(algoId);
+              
+              existingOrders.push({
+                type: orderType,
+                side: orderSide,
+                price: Number(ao.price || 0) || undefined,
+                qty: Number(ao.quantity || ao.origQty || 0) || undefined,
+                stopPrice: Number(ao.triggerPrice || ao.stopPrice || 0) || undefined,
+                isEntry,
+              });
+            }
+          } catch {}
+        } catch {}
+        
         const notification = formatTradeNotification({
           ticker: parsed.rawTicker,
           side,
@@ -959,6 +1030,8 @@ bot.on("text", async (ctx)=>{
           preset: presetNameEffective,
           market: !!parsed.market,
           noPreset: parsed.noPreset || false, // ✅ НОВОЕ: передаём флаг noPreset
+          existingTasks: existingTasks.length > 0 ? existingTasks : undefined,
+          existingOrders: existingOrders.length > 0 ? existingOrders : undefined,
         });
         
         // ✅ Генерируем уникальный ID для этой команды

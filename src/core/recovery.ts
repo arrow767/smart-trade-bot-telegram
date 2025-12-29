@@ -3,7 +3,7 @@ import type { TaskBook } from "./TaskBook";
 import type { Task } from "./types";
 import { DEFAULT_PRESET } from "./types";
 import { getPreset } from "../config/trading_config";
-import { cancelOnlySL } from "./OrderUtils";
+import { cancelOnlySL, cancelBracketOnly } from "./OrderUtils";
 import { adjustStopForMark, calcDesiredSLByRiskUsd, fmtQty5 } from "./TradingUtils";
 import { planTargets } from "./Planner";
 import { mergeDustToPrev, splitQtyToStep } from "../utils/math";
@@ -31,13 +31,16 @@ function hasAnyReduceOnlyTP(orders: any[]): boolean {
 
 function pickTaskForSymbol(tasks: Task[], posSide: "long" | "short"): Task | undefined {
   const active = new Set(["waiting_fill", "filled", "placing_bracket", "live"]);
-  const bySide = tasks.filter((t) => t.side === posSide && active.has(t.status));
+  // ✅ НОВОЕ: Фильтруем superseded задачи
+  const notSuperseded = tasks.filter((t) => !t.supersededBy);
+  const bySide = notSuperseded.filter((t) => t.side === posSide && active.has(t.status));
   if (bySide.length) {
-    return [...bySide].sort((a, b) => (b.updatedAt?.getTime?.() ?? 0) - (a.updatedAt?.getTime?.() ?? 0))[0];
+    // ✅ Сортируем по ID (более новая задача имеет приоритет)
+    return [...bySide].sort((a, b) => b.id - a.id)[0];
   }
-  const noSide = tasks.filter((t) => !t.side && active.has(t.status));
+  const noSide = notSuperseded.filter((t) => !t.side && active.has(t.status));
   if (noSide.length) {
-    return [...noSide].sort((a, b) => (b.updatedAt?.getTime?.() ?? 0) - (a.updatedAt?.getTime?.() ?? 0))[0];
+    return [...noSide].sort((a, b) => b.id - a.id)[0];
   }
   return undefined;
 }
@@ -127,9 +130,55 @@ export function startTaskRecoveryLoop(
   const orphanGraceMs = Number(process.env.RECOVERY_ORPHAN_GRACE_MS || 60_000);
   const emptySinceBySymbol = new Map<string, number>();
 
+  // ✅ НОВОЕ: Включить очистку ордеров если задач нет
+  const cleanupOrphanOrdersEnabled = String(process.env.RECOVERY_CLEANUP_ORPHAN_ORDERS || "true").toLowerCase() === "true" 
+    || String(process.env.RECOVERY_CLEANUP_ORPHAN_ORDERS || "true") === "1";
+  const symbolsWithOrphansGrace = new Map<string, number>(); // symbol → timestamp когда заметили
+
   const timer = setInterval(async () => {
     try {
-      const tasks = book.list().filter((t) => t.status !== "done" && t.status !== "canceled");
+      const allTasks = book.list();
+      const tasks = allTasks.filter((t) => t.status !== "done" && t.status !== "canceled" && !t.supersededBy);
+      
+      // ✅ НОВОЕ: Проверка на orphan ордера (ордера без задач)
+      if (cleanupOrphanOrdersEnabled && tasks.length === 0 && allTasks.length === 0) {
+        // Если вообще нет задач — проверяем все позиции на наличие ордеров
+        try {
+          const positions = await ex.fetchAllOpenPositions();
+          for (const pos of positions) {
+            const symbol = pos.symbol;
+            const filters = ex.getSymbolFilters(symbol);
+            const minQty = filters?.minQty || 0;
+            const posSize = Math.abs(pos.contracts ?? 0);
+            
+            // Если позиции нет — снимаем ордера
+            if (posSize < minQty * 0.5) {
+              try {
+                const open = (await ex.fetchOpenOrders(symbol)) as any[];
+                const algo = await ex.fetchOpenAlgoOrders(symbol).catch(() => []);
+                const anyOrders = (open?.length || 0) + (algo?.length || 0);
+                
+                if (anyOrders > 0) {
+                  const now = Date.now();
+                  const graceStart = symbolsWithOrphansGrace.get(symbol);
+                  
+                  if (!graceStart) {
+                    symbolsWithOrphansGrace.set(symbol, now);
+                  } else if (now - graceStart > 30_000) {
+                    // 30 секунд grace period прошло — снимаем ордера
+                    await cancelBracketOnly(ex, symbol, new Set()).catch(() => {});
+                    log(`🧹 Recovery: снял ${anyOrders} orphan ордеров по ${symbol} (задач нет)`);
+                    symbolsWithOrphansGrace.delete(symbol);
+                  }
+                } else {
+                  symbolsWithOrphansGrace.delete(symbol);
+                }
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+      
       if (!tasks.length) return;
 
       // ✅ ИСПРАВЛЕНО: Отслеживаем если получение позиций провалилось
