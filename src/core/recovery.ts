@@ -147,7 +147,8 @@ export function startTaskRecoveryLoop(
     || String(process.env.RECOVERY_CLEANUP_ORPHAN_ORDERS || "true") === "1";
   const symbolsWithOrphansGrace = new Map<string, number>(); // symbol → timestamp когда заметили
 
-  const timer = setInterval(async () => {
+  // ✅ КРИТИЧНО: Основная логика recovery вынесена в отдельную функцию
+  const runRecoveryCheck = async () => {
     try {
       const allTasks = book.list();
       // ✅ ИСПРАВЛЕНО: Включаем задачи с ошибками для очистки, но исключаем done/canceled
@@ -338,7 +339,19 @@ export function startTaskRecoveryLoop(
         }
       }
     } catch {}
-  }, Math.max(2_000, intervalMs));
+  };
+
+  // ✅ КРИТИЧНО: Немедленная проверка при старте (не ждём intervalMs)
+  // Это гарантирует что существующие задачи будут обработаны сразу после перезапуска
+  log(`🔄 Recovery: запуск немедленной проверки задач...`);
+  runRecoveryCheck().then(() => {
+    log(`✅ Recovery: начальная проверка завершена`);
+  }).catch((e) => {
+    console.error(`[ERROR] Recovery initial check failed: ${e?.message || e}`);
+  });
+
+  // Затем запускаем периодическую проверку
+  const timer = setInterval(runRecoveryCheck, Math.max(2_000, intervalMs));
 
   return { stop: () => clearInterval(timer) };
 }
