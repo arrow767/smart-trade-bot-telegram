@@ -418,21 +418,23 @@ bot.action("TASKS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     await ctx.answerCbQuery();
-    // Выводим список + кнопки Cancel для каждого
+    // ✅ ИСПРАВЛЕНО: Используем runCommand для консистентности
+    // Так tasks будет одинаково работать из inline кнопки и reply keyboard
+    await runCommand(ex, book, { kind:"tasks" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
+    
+    // Дополнительно показываем кнопки Cancel для каждой задачи
     const rows = book.list();
-    if (!rows.length) return ctx.reply(`Нет активных задач.`, { parse_mode:"HTML" });
-    for (const t of rows) {
-      const kb = Markup.inlineKeyboard([
-        [ Markup.button.callback(`Cancel #${t.id}`, `CANCEL|${t.id}`) ]
-      ]);
-      const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
-      await ctx.reply(
-        `<b>#${t.id}</b> [${t.status}] ${t.symbolCcxt}\n${t.label}\n${created}${t.error?`\nERR: ${escapeHtml(String(t.error))}`:""}`,
-        { parse_mode:"HTML", ...kb }
-      );
+    if (rows.length > 0) {
+      for (const t of rows) {
+        const kb = Markup.inlineKeyboard([
+          [ Markup.button.callback(`Cancel #${t.id}`, `CANCEL|${t.id}`) ]
+        ]);
+        await ctx.reply(
+          `🗑 Отменить задачу #${t.id}?`,
+          { parse_mode:"HTML", ...kb }
+        );
+      }
     }
-    // Кнопка «Cancel All» внизу
-    await ctx.reply(`Действия:`, { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("❌ Cancel All", "CANCEL_ALL")]]) });
   } catch (e:any) {
     console.error("TASKS action error:", e);
   }
