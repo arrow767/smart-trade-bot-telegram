@@ -109,15 +109,19 @@ async function ensureBracketsForTask(
   const tick = await ex.fetchTicker(symbol);
   const mark = Number(tick.last ?? tick.mark ?? (tick as any)?.info?.markPrice);
 
-  const open = (await ex.fetchOpenOrders(symbol)) as any[];
+  // ✅ ИСПРАВЛЕНО: Принудительно обновляем ордера (без кэша)
+  const open = (await ex.fetchOpenOrders(symbol, { force: true })) as any[];
   let algo: any[] = [];
   try { algo = await ex.fetchOpenAlgoOrders(symbol); } catch {}
   const all = [...open, ...algo];
 
   const hasSL = hasClosePositionSL(all);
-  const hasTP = hasAnyReduceOnlyTP(all); // ✅ FIX: проверяем все ордера, не только open
+  const hasTP = hasAnyReduceOnlyTP(all);
 
-  if (hasSL && hasTP) return;
+  // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть
+  if (hasSL && hasTP) {
+    return;
+  }
 
   const preset = await getPreset(task.presetName || DEFAULT_PRESET);
   const side = task.side || pos.side;
@@ -188,7 +192,8 @@ export function startTaskRecoveryLoop(
   ex: BinanceFutures,
   book: TaskBook,
   log: (msg: string) => void,
-  intervalMs = Number(process.env.RECOVERY_INTERVAL_MS || 10_000)
+  intervalMs = Number(process.env.RECOVERY_INTERVAL_MS || 10_000),
+  notify?: (msg: string) => void // ✅ НОВОЕ: опциональная отправка в Telegram
 ) {
   const enabled = String(process.env.RECOVERY_ENABLED || "true").toLowerCase() === "true" || String(process.env.RECOVERY_ENABLED || "true") === "1";
   if (!enabled) return { stop: () => {} };
@@ -362,7 +367,9 @@ export function startTaskRecoveryLoop(
           // Нет позиции и нет открытых ордеров — ордера отменены
           if (allCanceledOrExpired || notOpen.length === entryIds.length) {
             book.set(task, "canceled");
-            log(`🚫 Recovery: задача #${task.id} ${symbol} отменена (entry ордера отменены/истекли, позиции нет)`);
+            const msg = `🚫 Задача #${task.id} ${symbol} отменена (entry ордера сняты)`;
+            log(msg);
+            notify?.(msg); // ✅ НОВОЕ: Отправляем в Telegram
             continue;
           }
           
@@ -490,7 +497,9 @@ export function startTaskRecoveryLoop(
             // Позиция закрыта и ордеров нет — удаляем live задачи
             for (const t of liveTasks) {
               book.remove(t.id);
-              log(`🧹 Recovery: позиция ${symbol} закрыта вручную — удалил задачу #${t.id}`);
+              const msg = `🧹 Позиция ${symbol} закрыта вручную — задача #${t.id} удалена`;
+              log(msg);
+              notify?.(msg); // ✅ НОВОЕ: Отправляем в Telegram
             }
             continue;
           }

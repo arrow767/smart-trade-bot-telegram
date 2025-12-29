@@ -1157,7 +1157,18 @@ bot.catch(async (err, ctx) => {
 bot.launch().then(async ()=> {
   await ex.init(); // Синхронизация времени перед первым использованием
   await ex.loadMarkets();
-  startTaskRecoveryLoop(ex, book, (m) => console.log(m));
+  
+  // ✅ НОВОЕ: notify функция для отправки важных сообщений recovery в Telegram
+  const notifyChatId = allowedChatIds[0]; // Первый разрешённый chatId
+  const notifyTelegram = notifyChatId ? async (msg: string) => {
+    try {
+      await bot.telegram.sendMessage(notifyChatId, msg, { parse_mode: "HTML" });
+    } catch (e: any) {
+      console.warn(`[WARN] Failed to send recovery notification: ${e?.message || e}`);
+    }
+  } : undefined;
+  
+  startTaskRecoveryLoop(ex, book, (m) => console.log(m), undefined, notifyTelegram);
   console.log("Telegram bot started.");
 }).catch((e)=>{ console.error(e); });
 process.once("SIGINT", () => bot.stop("SIGINT"));
