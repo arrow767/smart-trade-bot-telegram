@@ -644,7 +644,9 @@ export async function runCommand(
   }
 
   if (parsed.kind === "tasks") {
-    const rows = book.list().map((t) => ({
+    const allTasks = book.list();
+    console.log(`[DEBUG] /tasks: book.list() вернул ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
+    const rows = allTasks.map((t) => ({
       id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
       created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
