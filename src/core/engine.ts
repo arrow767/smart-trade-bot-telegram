@@ -645,13 +645,19 @@ export async function runCommand(
 
   if (parsed.kind === "tasks") {
     const allTasks = book.list();
-    console.log(`[DEBUG] /tasks: book.list() вернул ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
+    const timestamp = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    console.log(`[DEBUG] /tasks @ ${timestamp}: book.list() вернул ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
     const rows = allTasks.map((t) => ({
       id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
       created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
     }));
-    info(formatTasks(mode, rows));
+    // ✅ DEBUG: Добавляем timestamp к выводу чтобы различить новые и старые сообщения
+    const formattedTasks = formatTasks(mode, rows);
+    const withTimestamp = mode === "telegram" 
+      ? `${formattedTasks}\n<i>📅 ${timestamp}</i>`
+      : formattedTasks;
+    info(withTimestamp);
     return;
   }
 

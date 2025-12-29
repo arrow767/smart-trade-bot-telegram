@@ -407,7 +407,22 @@ bot.hears("💰 Deposit", async (ctx)=>{
 bot.hears("🧰 Tasks", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
-    await runCommand(ex, book, { kind:"tasks" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
+    
+    // ✅ DEBUG: Логируем состояние book ПЕРЕД вызовом runCommand
+    const tasksBeforeRun = book.list();
+    console.log(`[DEBUG] 🧰 TASKS BUTTON: book.list() ПЕРЕД runCommand = ${tasksBeforeRun.length} задач: ${tasksBeforeRun.map(t => `#${t.id}`).join(", ") || "пусто"}`);
+    
+    await runCommand(ex, book, { kind:"tasks" }, (m) => {
+      // ✅ DEBUG: Логируем что передаётся в safeReply
+      console.log(`[DEBUG] 🧰 TASKS: formatTasks вернул сообщение длиной ${m.length} символов`);
+      console.log(`[DEBUG] 🧰 TASKS: Содержимое: ${m.slice(0, 200).replace(/\n/g, "\\n")}...`);
+      return safeReply(ctx, m, {parse_mode:"HTML"});
+    }, (m) => safeReply(ctx, m, {parse_mode:"HTML"}), "telegram");
+    
+    // ✅ DEBUG: Логируем состояние book ПОСЛЕ вызова runCommand
+    const tasksAfterRun = book.list();
+    console.log(`[DEBUG] 🧰 TASKS BUTTON: book.list() ПОСЛЕ runCommand = ${tasksAfterRun.length} задач`);
+    
   } catch (e:any) {
     console.error("hears Tasks error:", e);
   }
@@ -429,14 +444,14 @@ bot.action("TASKS", async (ctx)=>{
     await ctx.answerCbQuery();
     
     // ✅ КРИТИЧНО: Получаем актуальные данные из book
+    const timestamp = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const allTasks = book.list();
-    console.log(`[DEBUG] TASKS action: book.list() = ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
+    console.log(`[DEBUG] TASKS action @ ${timestamp}: book.list() = ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
     
     // ✅ ИСПРАВЛЕНО: РЕДАКТИРУЕМ текущее сообщение вместо отправки нового
-    // Это гарантирует что пользователь видит актуальные данные
     let tasksText: string;
     if (allTasks.length === 0) {
-      tasksText = "Нет активных задач.";
+      tasksText = `Нет активных задач.\n<i>📅 ${timestamp}</i>`;
     } else {
       const lines: string[] = [];
       for (const t of allTasks) {
@@ -447,15 +462,16 @@ bot.action("TASKS", async (ctx)=>{
         lines.push(`  ${t.label}`);
         if (t.error) lines.push(`  ⚠️ ${t.error}`);
       }
-      tasksText = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+      // ✅ DEBUG: Добавляем timestamp чтобы различить новые и старые сообщения
+      tasksText = `<pre>${escapeHtml(lines.join("\n"))}</pre>\n<i>📅 ${timestamp}</i>`;
     }
     
     // Пробуем отредактировать сообщение
     try {
       await ctx.editMessageText(tasksText, { parse_mode: "HTML", ...mainKb });
     } catch (editErr: any) {
-      // Если не удалось отредактировать (например, сообщение слишком старое) - отправляем новое
-      console.log(`[DEBUG] TASKS: не удалось отредактировать сообщение, отправляю новое: ${editErr?.message}`);
+      // Если не удалось отредактировать - отправляем новое
+      console.log(`[DEBUG] TASKS: не удалось отредактировать, отправляю новое: ${editErr?.message}`);
       await ctx.reply(tasksText, { parse_mode: "HTML", ...mainKb });
     }
     

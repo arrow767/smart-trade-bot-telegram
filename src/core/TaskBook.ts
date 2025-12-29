@@ -127,7 +127,11 @@ export class TaskBook {
   }
 
   list() {
-    return Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
+    const result = Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
+    // ✅ DEBUG: Логируем каждый вызов list()
+    const ids = result.map(t => `#${t.id}(${t.status})`).join(", ");
+    console.log(`[DEBUG] TaskBook.list() вызван → ${result.length} задач: ${ids || "пусто"}`);
+    return result;
   }
 
   get(id: number) {
@@ -156,8 +160,18 @@ export class TaskBook {
 
   /** Полное удаление таски */
   remove(id: number) {
+    const existed = this.tasks.has(id);
     this.tasks.delete(id);
     this.save();
+    
+    // ✅ DEBUG: Логируем удаление
+    console.log(`[DEBUG] TaskBook.remove(#${id}) → ${existed ? "УДАЛЕНО" : "НЕ НАЙДЕНО"}, осталось ${this.tasks.size} задач`);
+    
+    // ✅ DEBUG: Показываем оставшиеся задачи
+    if (this.tasks.size > 0) {
+      const remaining = Array.from(this.tasks.keys()).join(", ");
+      console.log(`[DEBUG] TaskBook: оставшиеся задачи: [${remaining}]`);
+    }
   }
 
   /** ✅ НОВОЕ: Получить все задачи по символу */
