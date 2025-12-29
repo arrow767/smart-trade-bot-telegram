@@ -11,9 +11,17 @@ import { mergeDustToPrev, splitQtyToStep } from "../utils/math";
 function hasClosePositionSL(orders: any[]): boolean {
   for (const o of orders) {
     const t = String(o?.type || o?.strategyType || "").toUpperCase();
-    const isStop = t.includes("STOP");
-    const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+    const isStop = t.includes("STOP") || t.includes("TAKE_PROFIT"); // STOP_MARKET, STOP, TAKE_PROFIT
+    const cp = o?.closePosition === true || o?.closePosition === "true" || 
+               o?.info?.closePosition === true || o?.info?.closePosition === "true" ||
+               // ✅ НОВОЕ: Algo orders могут иметь другую структуру
+               o?.strategyType === "STOP" || o?.strategyType === "STOP_MARKET";
     if (isStop && cp) return true;
+    // ✅ НОВОЕ: Любой STOP_MARKET с closePosition считаем SL
+    if (t === "STOP_MARKET" || t === "STOP") {
+      const hasCP = o?.closePosition || o?.info?.closePosition;
+      if (hasCP === true || hasCP === "true") return true;
+    }
   }
   return false;
 }
@@ -22,11 +30,33 @@ function hasAnyReduceOnlyTP(orders: any[]): boolean {
   for (const o of orders) {
     const t = String(o?.type || o?.strategyType || "").toUpperCase();
     const isLimit = t.includes("LIMIT") && !t.includes("STOP");
-    const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
-    const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+    const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || 
+               o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
+    const cp = o?.closePosition === true || o?.closePosition === "true" || 
+               o?.info?.closePosition === true || o?.info?.closePosition === "true";
     if (isLimit && ro && !cp) return true;
   }
   return false;
+}
+
+// ✅ НОВОЕ: Проверка кода ошибки Binance
+function isKnownAlgoError(e: any): { code: number; ignore: boolean } {
+  const code = Number(e?.code ?? e?.info?.code ?? NaN);
+  const msg = String(e?.message || "");
+  
+  // -4509: TIF GTE can only be used with open positions (нет позиции)
+  if (code === -4509 || /GTE.*can only be used with open positions/i.test(msg)) {
+    return { code: -4509, ignore: true };
+  }
+  // -4130: An open stop or take profit order already exists
+  if (code === -4130 || /open stop.*existing|closePosition.*existing/i.test(msg)) {
+    return { code: -4130, ignore: true };
+  }
+  // -2022: ReduceOnly Order is rejected (нет позиции для TP)
+  if (code === -2022 || /ReduceOnly.*rejected/i.test(msg)) {
+    return { code: -2022, ignore: true };
+  }
+  return { code: 0, ignore: false };
 }
 
 function pickTaskForSymbol(tasks: Task[], posSide: "long" | "short"): Task | undefined {
@@ -110,8 +140,18 @@ async function ensureBracketsForTask(
     if (Number.isFinite(safeSL) && safeSL > 0) {
       const keep = new Set((task.entryOrderIds || []).map(String));
       await cancelOnlySL(ex, symbol, keep).catch(() => {});
-      await ex.createStopMarketClose(symbol, sideExit as any, safeSL);
-      log(`🧯 Recovery: SL выставлен для #${task.id} ${symbol} (${side}) @ ${safeSL}`);
+      try {
+        await ex.createStopMarketClose(symbol, sideExit as any, safeSL);
+        log(`🧯 Recovery: SL выставлен для #${task.id} ${symbol} (${side}) @ ${safeSL}`);
+      } catch (slErr: any) {
+        const known = isKnownAlgoError(slErr);
+        if (known.ignore) {
+          // -4509: нет позиции, -4130: SL уже есть — не спамим
+          // Логируем только раз на уровне debug
+        } else {
+          throw slErr; // Пробрасываем неизвестные ошибки
+        }
+      }
     }
   }
 
@@ -124,10 +164,19 @@ async function ensureBracketsForTask(
     let placed = 0;
     for (let i = 0; i < re.tpPrices.length; i++) {
       const q = tpQtys[i];
-      if (!(q > 0)) continue;
+      if (!(q > 0) || q < filters.minQty) continue;
       const p = Number(ex.priceToPrecision(symbol, re.tpPrices[i]));
-      await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
-      placed++;
+      try {
+        await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
+        placed++;
+      } catch (tpErr: any) {
+        const known = isKnownAlgoError(tpErr);
+        if (known.ignore) {
+          // -2022: нет позиции — не спамим
+          break; // Прекращаем выставление TP
+        }
+        // Другие ошибки — продолжаем пробовать следующий TP
+      }
     }
     if (placed > 0) {
       log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(posSize)})`);
@@ -396,11 +445,12 @@ export function startTaskRecoveryLoop(
             try {
               await ensureBracketsForTask(ex, book, task, pos, log);
             } catch (e: any) {
-              console.warn(`[WARN] Recovery: ensureBracketsForTask failed for #${task.id} ${symbol}: ${e?.message || e}`);
+              // ✅ ИСПРАВЛЕНО: Не спамим известными ошибками
+              const known = isKnownAlgoError(e);
+              if (!known.ignore) {
+                console.warn(`[WARN] Recovery: ensureBracketsForTask failed for #${task.id} ${symbol}: ${e?.message || e}`);
+              }
             }
-          } else {
-            // ✅ DEBUG: Нет подходящей задачи для позиции
-            console.log(`[DEBUG] Recovery: position exists for ${symbol} (${pos.side}) but no matching task found. Tasks: ${ts.map(t => `#${t.id}[${t.status}]`).join(", ")}`);
           }
           continue;
         }
