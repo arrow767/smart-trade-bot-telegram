@@ -865,6 +865,28 @@ export class BinanceFutures {
         closePosition: true,
       };
     } catch (e: any) {
+      const code = Number(e?.code ?? e?.info?.code ?? NaN);
+      const msg = String(e?.message || e || "");
+      
+      // ✅ НОВОЕ: Обработка известных ошибок Algo Order API
+      // -4509: TIF GTE can only be used with open positions — позиция закрыта
+      // -4130: An open stop/TP with closePosition already exists — SL уже есть
+      if (code === -4509 || code === -4130 || 
+          /GTE.*can only be used with open positions/i.test(msg) ||
+          /closePosition.*existing/i.test(msg)) {
+        // Возвращаем "фейковый" результат — SL не нужен или уже есть
+        return {
+          id: `skipped-${code}`,
+          clientOrderId,
+          info: { skipped: true, reason: msg, code },
+          symbol,
+          side,
+          type: "STOP_MARKET",
+          stopPrice,
+          closePosition: true,
+        };
+      }
+      
       // Проверяем, может ордер всё-таки создался
       if (isTimeoutOrUnknown(e)) {
         const algoOrders = await this.fetchOpenAlgoOrders(symbol).catch(() => []);
@@ -905,6 +927,24 @@ export class BinanceFutures {
       this.clearTickerCache(symbol);
       return r;
     } catch (e: any) {
+      const code = Number(e?.code ?? e?.info?.code ?? NaN);
+      const msg = String(e?.message || e || "");
+      
+      // ✅ НОВОЕ: Обработка -2022 (ReduceOnly Order is rejected) — нет позиции
+      if (code === -2022 || /ReduceOnly.*rejected/i.test(msg)) {
+        // Возвращаем "фейковый" результат — TP не нужен (позиция закрыта)
+        return {
+          id: `skipped-${code}`,
+          clientOrderId,
+          info: { skipped: true, reason: msg, code },
+          symbol,
+          side,
+          type: "LIMIT",
+          amount,
+          price,
+        };
+      }
+      
       if (isTimeoutOrUnknown(e)) {
         const exists = await this.findOpenByClientId(symbol, clientOrderId);
         if (exists) return exists;

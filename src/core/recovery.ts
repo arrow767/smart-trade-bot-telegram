@@ -85,9 +85,23 @@ async function ensureBracketsForTask(
   const symbol = task.symbolCcxt;
   const filters = ex.getSymbolFilters(symbol);
   const minQty = filters.minQty || 0;
-  const posSize = Math.abs(pos.contracts || 0);
-  const entryAvg = Number(pos.entryPrice || 0) || 0;
-  if (!(posSize > minQty * 0.5) || !(entryAvg > 0)) return;
+  
+  // ✅ КРИТИЧНО: Перепроверяем позицию актуально (pos может быть устаревшим)
+  let actualPosSize = Math.abs(pos.contracts || 0);
+  let entryAvg = Number(pos.entryPrice || 0) || 0;
+  
+  try {
+    const freshPos = Math.abs(await ex.fetchPositionSize(symbol));
+    if (freshPos < minQty * 0.5) {
+      // Позиция уже закрыта — не ставим SL/TP
+      return;
+    }
+    actualPosSize = freshPos;
+  } catch {
+    // Если не удалось получить — используем переданные данные
+  }
+  
+  if (!(actualPosSize > minQty * 0.5) || !(entryAvg > 0)) return;
 
   // ✅ НОВОЕ: Обновляем статус задачи если она была в waiting_fill
   // Это критично для корректной работы после рестарта бота
@@ -95,9 +109,9 @@ async function ensureBracketsForTask(
     book.set(task, "live");
     // Обновляем taskEntry если ещё не было
     if (!task.taskEntryAvg || !task.taskEntryQty) {
-      book.setTaskEntry(task, entryAvg, posSize);
+      book.setTaskEntry(task, entryAvg, actualPosSize);
     }
-    log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (pos=${fmtQty5(posSize)} @ ${entryAvg})`);
+    log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (pos=${fmtQty5(actualPosSize)} @ ${entryAvg})`);
   }
 
   // ✅ НОВОЕ: Если noPreset=true — не ставим SL/TP
@@ -116,7 +130,41 @@ async function ensureBracketsForTask(
   const all = [...open, ...algo];
 
   const hasSL = hasClosePositionSL(all);
-  const hasTP = hasAnyReduceOnlyTP(all);
+  
+  // ✅ УЛУЧШЕНО: Проверяем TP более детально — сумма qty должна соответствовать позиции
+  let hasTP = hasAnyReduceOnlyTP(all);
+  let needRecalcTP = false;
+  
+  if (hasTP) {
+    // Проверяем что сумма TP ≈ размеру позиции
+    const tpOrders = open.filter((o: any) => {
+      const t = String(o?.type || "").toUpperCase();
+      const isLimit = t.includes("LIMIT") && !t.includes("STOP");
+      const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || 
+                 o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
+      const cp = o?.closePosition === true || o?.closePosition === "true" || 
+                 o?.info?.closePosition === true || o?.info?.closePosition === "true";
+      return isLimit && ro && !cp;
+    });
+    
+    const totalTPQty = tpOrders.reduce((sum: number, o: any) => {
+      return sum + (Number(o.amount ?? o.info?.origQty ?? 0) || 0);
+    }, 0);
+    
+    // Если сумма TP отличается от позиции более чем на 10% — пересчитываем
+    const diff = Math.abs(totalTPQty - actualPosSize) / Math.max(actualPosSize, 1e-12);
+    if (diff > 0.1) {
+      needRecalcTP = true;
+      // Снимаем старые TP
+      for (const o of tpOrders) {
+        if (o.id) {
+          try { await ex.cancelOrder(symbol, o.id); } catch {}
+        }
+      }
+      hasTP = false;
+      log(`🔄 Recovery: TP пересчитываются для #${task.id} ${symbol} (diff=${(diff * 100).toFixed(1)}%)`);
+    }
+  }
 
   // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть
   if (hasSL && hasTP) {
@@ -127,7 +175,7 @@ async function ensureBracketsForTask(
   const side = task.side || pos.side;
   const sideExit = side === "long" ? "sell" : "buy";
 
-  const positionUsd = posSize * entryAvg;
+  const positionUsd = actualPosSize * entryAvg;
   const totalPlannedUsd = task.totalUsd ?? positionUsd;
   const baseRisk =
     (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
@@ -137,7 +185,19 @@ async function ensureBracketsForTask(
   const effectiveRiskUsd = baseRisk * factor;
 
   if (!hasSL) {
-    const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+    // ✅ КРИТИЧНО: Ещё раз проверяем что позиция существует перед размещением SL
+    try {
+      const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
+      if (checkPos < minQty * 0.5) {
+        // Позиция закрыта — не ставим SL
+        return;
+      }
+    } catch {
+      // При ошибке — не ставим SL чтобы избежать -4509
+      return;
+    }
+    
+    const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, actualPosSize, effectiveRiskUsd);
     const precSL = Number(ex.priceToPrecision(symbol, desiredSL));
     const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
     const safeSL = Number(ex.priceToPrecision(symbol, safeSL0));
@@ -160,8 +220,21 @@ async function ensureBracketsForTask(
   }
 
   if (!hasTP) {
-    const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
-    let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
+    // ✅ КРИТИЧНО: Проверяем позицию перед размещением TP
+    try {
+      const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
+      if (checkPos < minQty * 0.5) {
+        // Позиция закрыта — не ставим TP
+        return;
+      }
+      // Используем актуальный размер для TP
+      actualPosSize = checkPos;
+    } catch {
+      // При ошибке — используем известный размер
+    }
+    
+    const re = planTargets({ side, entryPrice: entryAvg, positionUsd: actualPosSize * entryAvg, preset });
+    let tpQtys = splitQtyToStep(actualPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
     tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbol, q)));
 
@@ -183,7 +256,7 @@ async function ensureBracketsForTask(
       }
     }
     if (placed > 0) {
-      log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(posSize)})`);
+      log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(actualPosSize)})`);
     }
   }
 }
