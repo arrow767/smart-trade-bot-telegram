@@ -47,6 +47,7 @@ function pickTaskForSymbol(tasks: Task[], posSide: "long" | "short"): Task | und
 
 async function ensureBracketsForTask(
   ex: BinanceFutures,
+  book: TaskBook,
   task: Task,
   pos: { contracts: number; entryPrice: number; side: "long" | "short" },
   log: (msg: string) => void
@@ -57,6 +58,17 @@ async function ensureBracketsForTask(
   const posSize = Math.abs(pos.contracts || 0);
   const entryAvg = Number(pos.entryPrice || 0) || 0;
   if (!(posSize > minQty * 0.5) || !(entryAvg > 0)) return;
+
+  // ✅ НОВОЕ: Обновляем статус задачи если она была в waiting_fill
+  // Это критично для корректной работы после рестарта бота
+  if (task.status === "waiting_fill" || task.status === "filled" || task.status === "placing_bracket") {
+    book.set(task, "live");
+    // Обновляем taskEntry если ещё не было
+    if (!task.taskEntryAvg || !task.taskEntryQty) {
+      book.setTaskEntry(task, entryAvg, posSize);
+    }
+    log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (pos=${fmtQty5(posSize)} @ ${entryAvg})`);
+  }
 
   const tick = await ex.fetchTicker(symbol);
   const mark = Number(tick.last ?? tick.mark ?? (tick as any)?.info?.markPrice);
@@ -239,7 +251,7 @@ export function startTaskRecoveryLoop(
           emptySinceBySymbol.delete(symbol);
           const task = pickTaskForSymbol(ts, pos.side);
           if (task) {
-            await ensureBracketsForTask(ex, task, pos, log).catch(() => {});
+            await ensureBracketsForTask(ex, book, task, pos, log).catch(() => {});
           }
           continue;
         }
