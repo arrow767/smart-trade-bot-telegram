@@ -151,12 +151,25 @@ export function startTaskRecoveryLoop(
   const runRecoveryCheck = async () => {
     try {
       const allTasks = book.list();
-      // ✅ ИСПРАВЛЕНО: Включаем задачи с ошибками для очистки, но исключаем done/canceled
+      
+      // ✅ НОВОЕ: Немедленная очистка завершённых задач (done, canceled, superseded)
+      // Храним только активные задачи: waiting_fill, filled, placing_bracket, live
+      const terminalTasks = allTasks.filter((t) => 
+        t.status === "done" || t.status === "canceled" || t.supersededBy
+      );
+      for (const t of terminalTasks) {
+        book.remove(t.id);
+      }
+      if (terminalTasks.length > 0) {
+        log(`🧹 Recovery: удалено ${terminalTasks.length} завершённых задач (done/canceled/superseded)`);
+      }
+      
+      // Фильтруем оставшиеся активные задачи
       const activeTasks = allTasks.filter((t) => t.status !== "done" && t.status !== "canceled" && !t.supersededBy);
       const errorTasks = allTasks.filter((t) => t.status === "error" && !t.supersededBy);
       const tasks = activeTasks; // для обратной совместимости
       
-      // ✅ НОВОЕ: Очистка задач с ошибками (если нет позиции и ордеров)
+      // ✅ Очистка задач с ошибками (если нет позиции и ордеров)
       for (const errorTask of errorTasks) {
         try {
           const symbol = errorTask.symbolCcxt;
