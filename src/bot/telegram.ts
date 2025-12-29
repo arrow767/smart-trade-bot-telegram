@@ -67,16 +67,39 @@ const DEDUP_WINDOW_MS = 30_000; // окно дедупликации: 30 сек�
 const DEDUP_MAX_ENTRIES = 200; // максимум записей в кэше
 const recentMessages = new Map<string, number>(); // hash → timestamp
 
-function getMessageHash(chatId: number | string, text: string): string {
-  // Простой хэш: chatId + первые 200 символов текста (без timestamp/динамических частей)
-  // ✅ ИСПРАВЛЕНО: заменяем ВСЕ числа (включая целые) на N для лучшей дедупликации
-  const normalized = text.slice(0, 200).replace(/\d+/g, "N"); 
+function getMessageHash(chatId: number | string, text: string): string | null {
+  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к командам positions/deposit/tasks
+  // Эти команды должны всегда показывать актуальные данные
+  const skipDedupPatterns = [
+    /<b>📊 Positions<\/b>/i,
+    /<b>💰 Deposit<\/b>/i,
+    /<b>🧰 Tasks<\/b>/i,
+    /TICKER\s+DIR\s+PnL/i, // positions table header
+    /Total:\s+\$/i, // deposit total
+  ];
+  
+  for (const pattern of skipDedupPatterns) {
+    if (pattern.test(text)) {
+      // Возвращаем null чтобы пропустить дедупликацию
+      return null;
+    }
+  }
+  
+  // Для остальных сообщений: заменяем только числа в ценах/суммах (с точками)
+  // НО сохраняем структуру сообщения
+  const normalized = text.slice(0, 200).replace(/\d+\.\d+/g, "N.N"); // цены с точкой
   return `${chatId}:${normalized}`;
 }
 
 function isDuplicate(chatId: number | string, text: string): boolean {
-  const now = Date.now();
   const hash = getMessageHash(chatId, text);
+  
+  // ✅ Если hash = null - это команда positions/deposit, пропускаем дедупликацию
+  if (hash === null) {
+    return false;
+  }
+  
+  const now = Date.now();
   const lastSent = recentMessages.get(hash);
   
   if (lastSent && now - lastSent < DEDUP_WINDOW_MS) {
@@ -1046,6 +1069,21 @@ bot.on("text", async (ctx)=>{
         ]);
         
         const msg = await safeReply(ctx, notification, { parse_mode: "HTML", ...confirmButtons });
+        
+        // ✅ ИСПРАВЛЕНО: Проверяем что сообщение отправлено (не null из-за дедупликации)
+        if (!msg || !msg.message_id) {
+          // Если сообщение не отправлено (дедупликация), выполняем команду сразу
+          console.warn(`[WARN] Trade notification was deduplicated, executing command immediately`);
+          await runCommand(
+            ex, 
+            book, 
+            parsed, 
+            (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
+            (m) => safeReply(ctx, m, { parse_mode:"HTML" }), 
+            "telegram"
+          );
+          return;
+        }
         
         // Сохраняем команду для последующего выполнения
         pendingTrades.set(tradeId, {

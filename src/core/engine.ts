@@ -1630,6 +1630,43 @@ export async function runCommand(
         const hasSLNow = hasClosePositionConditional(allOpenOrders);
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
+        
+        // ✅ НОВОЕ: Если объём позиции изменился - пересчитываем TP
+        const posSizeChanged = Math.abs(posSize - lastSize) > 1e-9;
+        if (posSizeChanged && posSize > 0 && hasTPNow && !noPreset) {
+          // Проверяем что сумма TP соответствует текущему объёму позиции
+          try {
+            const currentTPOrders = open.filter((o: any) => {
+              const t = String(o?.type || "").toUpperCase();
+              const isLimit = t.includes("LIMIT") && !t.includes("STOP");
+              const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
+              const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+              return isLimit && ro && !cp;
+            });
+            
+            const totalTpQty = currentTPOrders.reduce((sum: number, o: any) => {
+              const qty = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
+              return sum + qty;
+            }, 0);
+            
+            // Если сумма TP не соответствует позиции - пересчитываем
+            if (Math.abs(totalTpQty - posSize) > 1e-9) {
+              if (mode === "console") {
+                console.log(`[DEBUG] TP qty mismatch: ${totalTpQty} vs pos=${posSize}, recalculating...`);
+              }
+              // Снимаем старые TP
+              for (const o of currentTPOrders) {
+                if (o.id) {
+                  try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
+                }
+              }
+              // Сбрасываем флаг чтобы выставить новые
+              tpsPlaced = false;
+              tpMessageSent = false;
+            }
+          } catch {}
+        }
+        
         // ✅ ИСПРАВЛЕНО: НЕ сбрасываем tpsPlaced если он уже был установлен
         // Это предотвращает спам "TP выставлены: 0 ордеров"
         // tpsPlaced сбрасывается только если TP были сняты ВРУЧНУЮ (hasTPNow было true, стало false)
@@ -1722,44 +1759,96 @@ export async function runCommand(
                 console.log(`[DEBUG] 🚀 PLACING TP: entriesLeft=${entriesLeft}, lastSize=${lastSize}, posSize=${posSize}`);
               }
               try {
+                // ✅ КРИТИЧНО: Проверяем что позиция реально существует на бирже
+                const actualPosSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
+                if (actualPosSize < minQtyForCheck) {
+                  if (mode === "console") {
+                    console.warn(`[WARN] Cannot place TP: position is flat (actualPosSize=${actualPosSize})`);
+                  }
+                  // Позиция закрыта - не выставляем TP
+                  tpsPlaced = true; // Помечаем чтобы не пытаться снова
+                } else {
+                  // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи
+                const actualPosSizeForTP = actualPosSize;
+                const actualPositionUsd = actualPosSizeForTP * entryAvg;
+                
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset2 });
+                const re = planTargets({ side, entryPrice: entryAvg, positionUsd: actualPositionUsd, preset: planningPreset2 });
 
-                let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
+                let tpQtys = splitQtyToStep(actualPosSizeForTP, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                
+                // ✅ КРИТИЧНО: Проверяем что сумма TP не больше позиции
+                const totalTpQty = tpQtys.reduce((sum, q) => sum + q, 0);
+                if (totalTpQty > actualPosSizeForTP + 1e-9) {
+                  // Корректируем пропорционально
+                  const ratio = actualPosSizeForTP / totalTpQty;
+                  tpQtys = tpQtys.map(q => Number(ex.amountToPrecision(symbolCcxt, q * ratio)));
+                  if (mode === "console") {
+                    console.warn(`[WARN] TP qty adjusted: ${totalTpQty} → ${tpQtys.reduce((s, q) => s + q, 0)} (pos=${actualPosSizeForTP})`);
+                  }
+                }
                 
                 let tpPlacedCount = 0;
                 for (let i = 0; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
-                  if (q <= 0) continue;
+                  if (q <= 0 || q < filters.minQty) continue;
                   const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-                  const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
-                  if (ord?.id) {
-                    tpIndexById.set(String(ord.id), i + 1);
-                    tpPlacedCount++;
+                  try {
+                    const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
+                    if (ord?.id) {
+                      tpIndexById.set(String(ord.id), i + 1);
+                      tpPlacedCount++;
+                    }
+                  } catch (tpErr: any) {
+                    const tpErrMsg = String(tpErr?.message || tpErr || "");
+                    const tpErrCode = Number(tpErr?.code ?? tpErr?.info?.code ?? NaN);
+                    
+                    // ✅ Обработка ошибки -2022: ReduceOnly Order is rejected (позиция закрыта или нет позиции)
+                    if (tpErrCode === -2022 || /ReduceOnly.*rejected/i.test(tpErrMsg)) {
+                      if (mode === "console") {
+                        console.warn(`[WARN] TP rejected (-2022): position may be closed or insufficient size`);
+                      }
+                      // Позиция закрыта - не пытаемся дальше
+                      break;
+                    }
+                    // Другие ошибки - логируем но продолжаем
+                    console.warn(`[WARN] Failed to place TP #${i + 1}: ${tpErrMsg}`);
                   }
                 }
                 tpsPlaced = true;
                 tpMessageSent = true; // ✅ Помечаем что сообщение отправлено
                 
-                // ✅ ИСПРАВЛЕНО: НЕ отправляем сообщение если выставлено 0 ордеров
-                if (tpPlacedCount > 0) {
-                  info(mode === "console" 
-                    ? `✅ TP выставлены: ${tpPlacedCount} ордеров`
-                    : `<b>✅ TP выставлены:</b> ${tpPlacedCount} ордеров`
-                  );
+                  // ✅ ИСПРАВЛЕНО: НЕ отправляем сообщение если выставлено 0 ордеров
+                  if (tpPlacedCount > 0) {
+                    info(mode === "console" 
+                      ? `✅ TP выставлены: ${tpPlacedCount} ордеров (pos=${fmtQty5(actualPosSizeForTP)})`
+                      : `<b>✅ TP выставлены:</b> ${tpPlacedCount} ордеров (pos=${fmtQty5(actualPosSizeForTP)})`
+                    );
+                  }
                 }
               } catch (e: any) {
                 console.error(`Failed to place TP: ${e?.message || e}`);
                 const errMsg = String(e?.message || e || "Unknown error");
-                // ✅ ИСПРАВЛЕНО: Не спамим ошибками если это временная проблема
-                const isTemporary = /timeout|network|timed out|ETIMEDOUT|ECONNRESET/i.test(errMsg);
-                if (!isTemporary) {
-                  info(mode === "console" 
-                    ? `⚠️ Ошибка выставления TP: ${errMsg}`
-                    : `<b>⚠️ Ошибка выставления TP:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
-                  );
+                const errCode = Number(e?.code ?? e?.info?.code ?? NaN);
+                
+                // ✅ Обработка ошибки -2022
+                if (errCode === -2022 || /ReduceOnly.*rejected/i.test(errMsg)) {
+                  if (mode === "console") {
+                    console.warn(`[WARN] TP placement failed (-2022): position may be closed`);
+                  }
+                  tpsPlaced = true; // Помечаем чтобы не пытаться снова
+                  // Не продолжаем выполнение - позиция закрыта
+                } else {
+                  // ✅ ИСПРАВЛЕНО: Не спамим ошибками если это временная проблема
+                  const isTemporary = /timeout|network|timed out|ETIMEDOUT|ECONNRESET/i.test(errMsg);
+                  if (!isTemporary) {
+                    info(mode === "console" 
+                      ? `⚠️ Ошибка выставления TP: ${errMsg}`
+                      : `<b>⚠️ Ошибка выставления TP:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                    );
+                  }
                 }
               }
             }
