@@ -944,12 +944,16 @@ export class BinanceFutures {
 
   /**
    * ✅ НОВОЕ: Получить статус ордера по ID
-   * Возвращает: { status: "open"|"closed"|"canceled", filled: number, average: number, ... }
-   * Если ордер не найден — бросает исключение
+   * 
+   * Binance статусы: NEW, PARTIALLY_FILLED, FILLED, CANCELED, REJECTED, EXPIRED
+   * CCXT нормализует: open (NEW, PARTIALLY_FILLED), closed (FILLED), canceled (CANCELED, EXPIRED, REJECTED)
+   * 
+   * Мы возвращаем оригинальный Binance статус из info.status для точности
    */
   async fetchOrder(symbol: string, orderId: string): Promise<{
     id: string;
-    status: "open" | "closed" | "canceled" | "expired" | "rejected";
+    status: "NEW" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED";
+    ccxtStatus: "open" | "closed" | "canceled";
     filled: number;
     remaining: number;
     average: number;
@@ -959,9 +963,12 @@ export class BinanceFutures {
     info: any;
   }> {
     const order = await this.fapi.fetchOrder(orderId, symbol);
+    // Берём оригинальный Binance статус из info.status
+    const binanceStatus = String(order.info?.status || "").toUpperCase() as any;
     return {
       id: String(order.id),
-      status: order.status as any,
+      status: binanceStatus || order.status?.toUpperCase() as any,
+      ccxtStatus: order.status as any,
       filled: Number(order.filled || 0),
       remaining: Number(order.remaining || 0),
       average: Number(order.average || order.price || 0),
@@ -974,11 +981,17 @@ export class BinanceFutures {
 
   /**
    * ✅ НОВОЕ: Получить статус нескольких ордеров по ID (batch)
-   * Возвращает Map<orderId, orderStatus>
-   * Ордера которые не найдены — пропускаются (не в Map)
+   * 
+   * Binance статусы:
+   * - NEW: ордер создан, ожидает исполнения
+   * - PARTIALLY_FILLED: частично исполнен (есть filled > 0, но remaining > 0)
+   * - FILLED: полностью исполнен
+   * - CANCELED: отменен пользователем
+   * - EXPIRED: истек (IOC/FOK не исполнился, или время истекло)
+   * - REJECTED: отклонен биржей
    */
   async fetchOrdersStatus(symbol: string, orderIds: string[]): Promise<Map<string, {
-    status: "open" | "closed" | "canceled" | "expired" | "rejected";
+    status: "NEW" | "PARTIALLY_FILLED" | "FILLED" | "CANCELED" | "EXPIRED" | "REJECTED";
     filled: number;
     average: number;
   }>> {
