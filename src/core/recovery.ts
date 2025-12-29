@@ -371,6 +371,12 @@ export function startTaskRecoveryLoop(
       // - REJECTED: отклонен биржей
       //
       const waitingFillTasks = activeTasks.filter(t => t.status === "waiting_fill" && t.entryOrderIds?.length);
+      
+      // ✅ DEBUG: Логируем что нашли
+      if (waitingFillTasks.length > 0) {
+        console.log(`[DEBUG] Recovery: найдено ${waitingFillTasks.length} waiting_fill задач: ${waitingFillTasks.map(t => `#${t.id}`).join(", ")}`);
+      }
+      
       for (const task of waitingFillTasks) {
         try {
           const symbol = task.symbolCcxt;
@@ -379,25 +385,45 @@ export function startTaskRecoveryLoop(
           const entryIds = task.entryOrderIds || [];
           if (entryIds.length === 0) continue;
           
+          console.log(`[DEBUG] Recovery #${task.id}: проверяю entry ордера [${entryIds.join(", ")}] для ${symbol}`);
+          
           // ✅ НОВОЕ: Сначала проверяем есть ли ордера в открытых (быстрая проверка)
           const openOrders = (await ex.fetchOpenOrders(symbol)) as any[];
           let algoOrders: any[] = [];
-          try { algoOrders = await ex.fetchOpenAlgoOrders(symbol); } catch {}
+          let algoFetchError = "";
+          try { 
+            algoOrders = await ex.fetchOpenAlgoOrders(symbol); 
+          } catch (e: any) {
+            algoFetchError = e?.message || "unknown";
+          }
+          
+          console.log(`[DEBUG] Recovery #${task.id}: openOrders=${openOrders.length}, algoOrders=${algoOrders.length}${algoFetchError ? `, algoError=${algoFetchError}` : ""}`);
           
           const allOpenIds = new Set<string>();
           for (const o of [...openOrders, ...algoOrders]) {
-            allOpenIds.add(String(o.id || o.orderId || ""));
-            allOpenIds.add(String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || ""));
-            if (o.info?.orderId) allOpenIds.add(String(o.info.orderId));
-            if (o.algoId) allOpenIds.add(String(o.algoId));
+            const ids = [
+              String(o.id || ""),
+              String(o.orderId || ""),
+              String(o.clientOrderId || ""),
+              String(o.clientAlgoId || ""),
+              String(o.newClientOrderId || ""),
+              String(o.info?.orderId || ""),
+              String(o.algoId || ""),
+            ].filter(x => x && x !== "undefined" && x !== "null");
+            ids.forEach(id => allOpenIds.add(id));
           }
+          
+          console.log(`[DEBUG] Recovery #${task.id}: allOpenIds=[${Array.from(allOpenIds).slice(0, 10).join(", ")}${allOpenIds.size > 10 ? "..." : ""}]`);
           
           // Проверяем сколько entry ордеров еще открыто
           const stillOpen = entryIds.filter(id => allOpenIds.has(String(id)));
           const notOpen = entryIds.filter(id => !allOpenIds.has(String(id)));
           
+          console.log(`[DEBUG] Recovery #${task.id}: stillOpen=${stillOpen.length}, notOpen=${notOpen.length}`);
+          
           // Если все entry ордера еще открыты — задача ждёт
           if (stillOpen.length === entryIds.length) {
+            console.log(`[DEBUG] Recovery #${task.id}: все entry ордера открыты, ждём`);
             continue;
           }
           
@@ -405,6 +431,8 @@ export function startTaskRecoveryLoop(
           const filters = ex.getSymbolFilters(symbol);
           const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
           const hasPosition = posSize > (filters?.minQty || 0) * 0.5;
+          
+          console.log(`[DEBUG] Recovery #${task.id}: posSize=${posSize}, hasPosition=${hasPosition}`);
           
           // Если есть открытые ордера — ждём
           if (stillOpen.length > 0) {
@@ -426,8 +454,7 @@ export function startTaskRecoveryLoop(
           }
           
           // ✅ КРИТИЧНО: Нет позиции И нет открытых entry ордеров → task отменён
-          // Это работает и для Algo Orders (STOP_MARKET entry) которые не находятся в fetchOrdersStatus
-          // Логика простая: если ордеров нет и позиции нет — значит всё отменено
+          console.log(`[DEBUG] Recovery #${task.id}: НЕТ позиции И НЕТ entry ордеров → ОТМЕНЯЕМ`);
           book.set(task, "canceled");
           book.remove(task.id);
           const msg = `🚫 Задача #${task.id} ${symbol} отменена (entry ордера сняты, позиции нет)`;

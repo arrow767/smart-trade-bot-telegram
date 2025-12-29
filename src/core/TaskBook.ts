@@ -64,6 +64,7 @@ export class TaskBook {
     try {
       if (!fs.existsSync(TASKS_JSON)) return;
       const raw = JSON.parse(fs.readFileSync(TASKS_JSON, "utf-8")) as any[];
+      console.log(`[DEBUG] TaskBook: загружаю ${raw?.length || 0} задач из ${TASKS_JSON}`);
       for (const o of raw || []) {
         const t: Task = {
           id: Number(o.id),
@@ -87,8 +88,12 @@ export class TaskBook {
           noPreset: o.noPreset === true || o.noPreset === "true",
         };
         this.tasks.set(t.id, t);
+        // ✅ DEBUG: Логируем каждую задачу при загрузке
+        console.log(`[DEBUG] TaskBook: загружена задача #${t.id} ${t.symbolCcxt} status=${t.status} entryIds=[${t.entryOrderIds?.join(", ") || ""}]`);
       }
-    } catch {}
+    } catch (e: any) {
+      console.error(`[ERROR] TaskBook: ошибка загрузки: ${e?.message}`);
+    }
   }
 
   add(
