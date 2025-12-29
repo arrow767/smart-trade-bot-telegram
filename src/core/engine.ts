@@ -1430,10 +1430,12 @@ export async function runCommand(
         const wasInPosition = lastSize > minQty * 0.5;
         const taskAge = Date.now() - TASK_CREATED_AT;
         
-        // ✅ УЛУЧШЕНО: Также считаем "была позиция" если task.status === "live"
-        const taskStatus = book.get(task.id)?.status;
-        const taskWasLive = taskStatus === "live" || taskStatus === "filled";
-        const hadPosition = wasInPosition || taskWasLive;
+        // ✅ УЛУЧШЕНО: Также считаем "была позиция" если task.status === "live" или "filled"
+        const currentTask = book.get(task.id);
+        const taskWasLive = currentTask?.status === "live" || currentTask?.status === "filled";
+        // ✅ НОВОЕ: Также считаем что позиция была, если taskEntryQty > 0 (мы отслеживаем вход)
+        const taskHadEntry = (currentTask?.taskEntryQty || 0) > 0;
+        const hadPosition = wasInPosition || taskWasLive || taskHadEntry;
         
         // Если позиция была (по lastSize или по статусу task) и сейчас flat
         const manuallyClosed = hadPosition && flat && taskAge >= 2000;
@@ -1667,11 +1669,12 @@ export async function runCommand(
           } catch {}
         }
         
-        // ✅ ИСПРАВЛЕНО: НЕ сбрасываем tpsPlaced если он уже был установлен
-        // Это предотвращает спам "TP выставлены: 0 ордеров"
-        // tpsPlaced сбрасывается только если TP были сняты ВРУЧНУЮ (hasTPNow было true, стало false)
-        // Но если tpMessageSent = true, значит мы уже отправили сообщение и не нужно спамить
-        if (!hasTPNow && !tpMessageSent) tpsPlaced = false;
+        // ✅ ИСПРАВЛЕНО: Если TP сняты — всегда сбрасываем флаг чтобы выставить новые
+        // Не блокируем по tpMessageSent — это только для предотвращения спама сообщений
+        if (!hasTPNow) {
+          tpsPlaced = false;
+          // Не сбрасываем tpMessageSent чтобы не спамить (сообщение показываем только при первом размещении)
+        }
 
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;

@@ -68,14 +68,18 @@ const DEDUP_MAX_ENTRIES = 200; // максимум записей в кэше
 const recentMessages = new Map<string, number>(); // hash → timestamp
 
 function getMessageHash(chatId: number | string, text: string): string | null {
-  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к командам positions/deposit/tasks
+  // ✅ ИСПРАВЛЕНО: Не применяем дедупликацию к командам positions/deposit/tasks/orders
   // Эти команды должны всегда показывать актуальные данные
   const skipDedupPatterns = [
-    /<b>📊 Positions<\/b>/i,
-    /<b>💰 Deposit<\/b>/i,
-    /<b>🧰 Tasks<\/b>/i,
-    /TICKER\s+DIR\s+PnL/i, // positions table header
-    /Total:\s+\$/i, // deposit total
+    /📊\s*Positions/i,       // positions header (любой формат)
+    /💰\s*Deposit/i,         // deposit header
+    /🧰\s*Tasks/i,           // tasks header
+    /<pre>TICKER/i,          // positions table (pre format)
+    /Total:\s*\$/i,          // deposit total
+    /Futures\s*USDT/i,       // deposit details
+    /Открытых\s*позиций/i,   // no positions message
+    /Нет\s*активных\s*задач/i, // no tasks message
+    /📋\s*Orders/i,          // orders header
   ];
   
   for (const pattern of skipDedupPatterns) {

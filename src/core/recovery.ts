@@ -138,10 +138,39 @@ export function startTaskRecoveryLoop(
   const timer = setInterval(async () => {
     try {
       const allTasks = book.list();
-      const tasks = allTasks.filter((t) => t.status !== "done" && t.status !== "canceled" && !t.supersededBy);
+      // ✅ ИСПРАВЛЕНО: Включаем задачи с ошибками для очистки, но исключаем done/canceled
+      const activeTasks = allTasks.filter((t) => t.status !== "done" && t.status !== "canceled" && !t.supersededBy);
+      const errorTasks = allTasks.filter((t) => t.status === "error" && !t.supersededBy);
+      const tasks = activeTasks; // для обратной совместимости
+      
+      // ✅ НОВОЕ: Очистка задач с ошибками (если нет позиции и ордеров)
+      for (const errorTask of errorTasks) {
+        try {
+          const symbol = errorTask.symbolCcxt;
+          if (!symbol) continue;
+          
+          const filters = ex.getSymbolFilters(symbol);
+          const minQty = filters?.minQty || 0;
+          
+          // Проверяем позицию
+          const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
+          const flat = posSize < minQty * 0.5;
+          
+          // Проверяем ордера
+          const open = (await ex.fetchOpenOrders(symbol) as any[]).length;
+          let algo = 0;
+          try { algo = (await ex.fetchOpenAlgoOrders(symbol)).length; } catch {}
+          const noOrders = open === 0 && algo === 0;
+          
+          if (flat && noOrders) {
+            book.remove(errorTask.id);
+            log(`🧹 Recovery: удалил задачу с ошибкой #${errorTask.id} по ${symbol} (нет позиций и ордеров)`);
+          }
+        } catch {}
+      }
       
       // ✅ НОВОЕ: Проверка на orphan ордера (ордера без задач)
-      if (cleanupOrphanOrdersEnabled && tasks.length === 0 && allTasks.length === 0) {
+      if (cleanupOrphanOrdersEnabled && activeTasks.length === 0 && allTasks.length === 0) {
         // Если вообще нет задач — проверяем все позиции на наличие ордеров
         try {
           const positions = await ex.fetchAllOpenPositions();
@@ -232,6 +261,28 @@ export function startTaskRecoveryLoop(
           // Позиция на самом деле есть — fetchAllOpenPositions врёт или устарел
           emptySinceBySymbol.delete(symbol);
           continue;
+        }
+        
+        // ✅ НОВОЕ: Если позиции нет, проверяем live/filled задачи — возможно позиция закрыта вручную
+        const liveTasks = ts.filter(t => t.status === "live" || t.status === "filled");
+        if (liveTasks.length > 0) {
+          // Проверяем ордера
+          let hasOrders = false;
+          try {
+            const open = (await ex.fetchOpenOrders(symbol) as any[]).length;
+            let algo = 0;
+            try { algo = (await ex.fetchOpenAlgoOrders(symbol)).length; } catch {}
+            hasOrders = (open + algo) > 0;
+          } catch {}
+          
+          if (!hasOrders) {
+            // Позиция закрыта и ордеров нет — удаляем live задачи
+            for (const t of liveTasks) {
+              book.remove(t.id);
+              log(`🧹 Recovery: позиция ${symbol} закрыта вручную — удалил задачу #${t.id}`);
+            }
+            continue;
+          }
         }
 
         // 2) Если позиции нет — проверяем "висячие" tasks (нет ордеров вообще) с grace-time
