@@ -408,23 +408,32 @@ bot.hears("🧰 Tasks", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     
-    // ✅ DEBUG: Логируем состояние book ПЕРЕД вызовом runCommand
-    const tasksBeforeRun = book.list();
-    console.log(`[DEBUG] 🧰 TASKS BUTTON: book.list() ПЕРЕД runCommand = ${tasksBeforeRun.length} задач: ${tasksBeforeRun.map(t => `#${t.id}`).join(", ") || "пусто"}`);
+    // ✅ ПРОСТАЯ ЛОГИКА: Напрямую получаем задачи и отправляем
+    const allTasks = book.list();
+    const taskIds = allTasks.map(t => `#${t.id}`).join(", ") || "нет";
+    console.log(`[TASKS] Кнопка нажата → ${allTasks.length} задач: ${taskIds}`);
     
-    await runCommand(ex, book, { kind:"tasks" }, (m) => {
-      // ✅ DEBUG: Логируем что передаётся в safeReply
-      console.log(`[DEBUG] 🧰 TASKS: formatTasks вернул сообщение длиной ${m.length} символов`);
-      console.log(`[DEBUG] 🧰 TASKS: Содержимое: ${m.slice(0, 200).replace(/\n/g, "\\n")}...`);
-      return safeReply(ctx, m, {parse_mode:"HTML"});
-    }, (m) => safeReply(ctx, m, {parse_mode:"HTML"}), "telegram");
+    let text: string;
+    if (allTasks.length === 0) {
+      text = "Нет активных задач.";
+    } else {
+      const lines: string[] = [];
+      for (const t of allTasks) {
+        const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
+        const shortSym = t.symbolCcxt.replace("/USDT:USDT", "").replace("/USDT", "");
+        lines.push(`#${t.id} [${t.status}] ${shortSym}  ${created}  ${t.label}`);
+        if (t.error) lines.push(`  ⚠️ ${t.error}`);
+      }
+      text = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
+    }
     
-    // ✅ DEBUG: Логируем состояние book ПОСЛЕ вызова runCommand
-    const tasksAfterRun = book.list();
-    console.log(`[DEBUG] 🧰 TASKS BUTTON: book.list() ПОСЛЕ runCommand = ${tasksAfterRun.length} задач`);
+    // ✅ ПРЯМАЯ ОТПРАВКА без safeReply и дедупликации
+    await ctx.reply(text, { parse_mode: "HTML" });
+    console.log(`[TASKS] Сообщение отправлено в Telegram`);
     
   } catch (e:any) {
-    console.error("hears Tasks error:", e);
+    console.error("[TASKS] Ошибка:", e);
+    try { await ctx.reply(`Ошибка: ${e?.message || e}`); } catch {}
   }
 });
 
@@ -443,52 +452,32 @@ bot.action("TASKS", async (ctx)=>{
     if (!isAllowed(ctx)) return deny(ctx);
     await ctx.answerCbQuery();
     
-    // ✅ КРИТИЧНО: Получаем актуальные данные из book
-    const timestamp = new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    // ✅ ПРОСТАЯ ЛОГИКА: Напрямую получаем задачи
     const allTasks = book.list();
-    console.log(`[DEBUG] TASKS action @ ${timestamp}: book.list() = ${allTasks.length} задач: ${allTasks.map(t => `#${t.id}(${t.status})`).join(", ") || "пусто"}`);
+    const taskIds = allTasks.map(t => `#${t.id}`).join(", ") || "нет";
+    console.log(`[TASKS inline] Кнопка нажата → ${allTasks.length} задач: ${taskIds}`);
     
-    // ✅ ИСПРАВЛЕНО: РЕДАКТИРУЕМ текущее сообщение вместо отправки нового
-    let tasksText: string;
+    let text: string;
     if (allTasks.length === 0) {
-      tasksText = `Нет активных задач.\n<i>📅 ${timestamp}</i>`;
+      text = "Нет активных задач.";
     } else {
       const lines: string[] = [];
       for (const t of allTasks) {
         const created = t.startedAt.toISOString().replace("T"," ").slice(0,19);
         const shortSym = t.symbolCcxt.replace("/USDT:USDT", "").replace("/USDT", "");
-        lines.push(`#${t.id} [${t.status}] ${shortSym}`);
-        lines.push(`  ${created}`);
-        lines.push(`  ${t.label}`);
+        lines.push(`#${t.id} [${t.status}] ${shortSym}  ${created}  ${t.label}`);
         if (t.error) lines.push(`  ⚠️ ${t.error}`);
       }
-      // ✅ DEBUG: Добавляем timestamp чтобы различить новые и старые сообщения
-      tasksText = `<pre>${escapeHtml(lines.join("\n"))}</pre>\n<i>📅 ${timestamp}</i>`;
+      text = `<pre>${escapeHtml(lines.join("\n"))}</pre>`;
     }
     
-    // Пробуем отредактировать сообщение
-    try {
-      await ctx.editMessageText(tasksText, { parse_mode: "HTML", ...mainKb });
-    } catch (editErr: any) {
-      // Если не удалось отредактировать - отправляем новое
-      console.log(`[DEBUG] TASKS: не удалось отредактировать, отправляю новое: ${editErr?.message}`);
-      await ctx.reply(tasksText, { parse_mode: "HTML", ...mainKb });
-    }
+    // ✅ ПРЯМАЯ ОТПРАВКА - всегда новое сообщение
+    await ctx.reply(text, { parse_mode: "HTML", ...mainKb });
+    console.log(`[TASKS inline] Сообщение отправлено в Telegram`);
     
-    // Показываем кнопки Cancel для каждой задачи
-    if (allTasks.length > 0) {
-      for (const t of allTasks) {
-        const kb = Markup.inlineKeyboard([
-          [ Markup.button.callback(`❌ Cancel #${t.id}`, `CANCEL|${t.id}`) ]
-        ]);
-        await ctx.reply(
-          `🗑 Отменить #${t.id} ${t.symbolCcxt.replace("/USDT:USDT", "")}?`,
-          { parse_mode:"HTML", ...kb }
-        );
-      }
-    }
   } catch (e:any) {
-    console.error("TASKS action error:", e);
+    console.error("[TASKS inline] Ошибка:", e);
+    try { await ctx.reply(`Ошибка: ${e?.message || e}`); } catch {}
   }
 });
 

@@ -57,7 +57,10 @@ export class TaskBook {
         2
       );
       fs.writeFileSync(TASKS_JSON, out, "utf-8");
-    } catch {}
+    } catch (e: any) {
+      // ✅ Логируем ошибку вместо молчаливого проглатывания
+      console.error(`[ERROR] TaskBook.save() failed: ${e?.message || e}`);
+    }
   }
 
   private load() {
@@ -127,11 +130,7 @@ export class TaskBook {
   }
 
   list() {
-    const result = Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
-    // ✅ DEBUG: Логируем каждый вызов list()
-    const ids = result.map(t => `#${t.id}(${t.status})`).join(", ");
-    console.log(`[DEBUG] TaskBook.list() вызван → ${result.length} задач: ${ids || "пусто"}`);
-    return result;
+    return Array.from(this.tasks.values()).sort((a, b) => a.id - b.id);
   }
 
   get(id: number) {
@@ -160,18 +159,8 @@ export class TaskBook {
 
   /** Полное удаление таски */
   remove(id: number) {
-    const existed = this.tasks.has(id);
     this.tasks.delete(id);
     this.save();
-    
-    // ✅ DEBUG: Логируем удаление
-    console.log(`[DEBUG] TaskBook.remove(#${id}) → ${existed ? "УДАЛЕНО" : "НЕ НАЙДЕНО"}, осталось ${this.tasks.size} задач`);
-    
-    // ✅ DEBUG: Показываем оставшиеся задачи
-    if (this.tasks.size > 0) {
-      const remaining = Array.from(this.tasks.keys()).join(", ");
-      console.log(`[DEBUG] TaskBook: оставшиеся задачи: [${remaining}]`);
-    }
   }
 
   /** ✅ НОВОЕ: Получить все задачи по символу */
