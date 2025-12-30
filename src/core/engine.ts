@@ -974,6 +974,7 @@ export async function runCommand(
         let tpsPlaced = false;
         let tpMessageSent = false; // ✅ НОВОЕ: сообщение о TP уже отправлено
         let slPxCurrent: number | undefined;
+        let slMessageSent = false; // ✅ НОВОЕ: отправлено ли сообщение о SL (антиспам)
         let planSent = false; // ✅ Флаг: план уже отправлен
         const tpIndexById = new Map<string, number>();
 
@@ -1321,6 +1322,7 @@ export async function runCommand(
       let tpsPlaced = false;
       let tpMessageSent = false; // ✅ НОВОЕ: отправлено ли сообщение о TP (отдельно от tpsPlaced)
       let slPxCurrent: number | undefined;
+      let slMessageSent = false; // ✅ НОВОЕ: отправлено ли сообщение о SL (антиспам)
       let planSent = false; // ✅ Флаг: план уже отправлен в Telegram
       const tpIndexById = new Map<string, number>(); // ✅ Для отслеживания TP ордеров
       
@@ -1781,10 +1783,14 @@ export async function runCommand(
                 } else {
                 await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
                 slPxCurrent = safeSL;
-                info(mode === "console" 
-                  ? `✅ SL выставлен: ${safeSL}`
-                  : `<b>✅ SL выставлен:</b> ${safeSL}`
-                );
+                // ✅ АНТИСПАМ: Отправляем сообщение только один раз
+                if (!slMessageSent) {
+                  info(mode === "console" 
+                    ? `✅ SL выставлен: ${safeSL}`
+                    : `<b>✅ SL выставлен:</b> ${safeSL}`
+                  );
+                  slMessageSent = true;
+                }
                 }
               } catch (e: any) {
                 // Binance: -4130 означает, что уже есть открытый closePosition STOP/TP в этом направлении.
