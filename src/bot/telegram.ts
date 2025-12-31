@@ -949,6 +949,10 @@ bot.on("text", async (ctx)=>{
     }
 
     const parsed = parseLine(text);
+    // DEBUG: показать что распарсилось для risk_calc
+    if (parsed?.kind === "risk_calc") {
+      console.log(`[TG DEBUG] parsed risk_calc: ticker=${parsed.ticker}, risk=${parsed.risk}, coef=${parsed.coef}`);
+    }
     if (!parsed) return safeReply(ctx, `Неверный формат. Пример:\n<code>l xrp 500 2.45 4h</code>`, { parse_mode:"HTML" });
 
     // команда exit удалена
