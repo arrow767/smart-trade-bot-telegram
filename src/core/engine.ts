@@ -247,7 +247,10 @@ export async function runCommand(
 
   // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk> [coef]
   if (parsed.kind === "risk_calc") {
-    const { ticker, risk, coef } = parsed;
+    const ticker = parsed.ticker;
+    const risk = parsed.risk;
+    const customCoef = parsed.coef; // Кастомный коэффициент из команды
+    
     if (!Number.isFinite(risk) || risk <= 0) {
       info(mode === "console" 
         ? `Неверный ввод. Пример: r xrp 100 [коэф]\n  r xrp 100 0.85` 
@@ -256,8 +259,11 @@ export async function runCommand(
     }
     try {
       const { calculateRisk, formatNatrResultConsole, formatNatrResultTelegram, DEFAULT_NATR_CONFIG } = await import("./NatrCalculator");
-      // Если передан коэффициент - используем его, иначе дефолтный
-      const config = coef ? { ...DEFAULT_NATR_CONFIG, coef } : DEFAULT_NATR_CONFIG;
+      // ✅ ИСПРАВЛЕНО: Явно создаём конфиг с кастомным коэффициентом
+      const finalCoef = (typeof customCoef === "number" && Number.isFinite(customCoef) && customCoef > 0) 
+        ? customCoef 
+        : DEFAULT_NATR_CONFIG.coef;
+      const config = { ...DEFAULT_NATR_CONFIG, coef: finalCoef };
       const result = await calculateRisk(ex, ticker, risk, config);
       const formatted = mode === "console" 
         ? formatNatrResultConsole(result)

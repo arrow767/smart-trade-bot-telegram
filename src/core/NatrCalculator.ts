@@ -295,27 +295,27 @@ export async function calculateRisk(
  */
 export function formatNatrResultConsole(r: NatrResult): string {
   const fmt = (n: number, d = 4) => n.toFixed(d);
-  const fmtVol = (n: number) => Math.round(n).toLocaleString("ru-RU");
+  const fmtNum = (n: number) => Math.round(n).toLocaleString("ru-RU"); // с пробелами
   const fmtPrice = (n: number) => n < 1 ? n.toPrecision(5) : fmt(n, 2);
 
   return `
 ┌─ RISK CALCULATOR ────────────────────────┐
 │ ${r.symbol.replace("/USDT:USDT", "")}  Price: ${fmtPrice(r.price)}
-│ Risk: $${r.risk}  Coef: ${r.coef}
+│ Risk: $${fmtNum(r.risk)}  Coef: ${r.coef}
 ├──────────────────────────────────────────┤
 │ L=100                                    │
 │   NATR:      ${fmt(r.natr100)}%
 │   NATR×coef: ${fmt(r.natrCoef100)}%
 │   ×1×0.85:   ${fmt(r.thr85_100)}%
 │   ×2×0.85:   ${fmt(r.thr2_85_100)}%
-│   Volume:    ${fmtVol(r.volume100)}
+│   Volume:    ${fmtNum(r.volume100)}
 ├──────────────────────────────────────────┤
 │ L=300                                    │
 │   NATR:      ${fmt(r.natr300)}%
 │   NATR×coef: ${fmt(r.natrCoef300)}%
 │   ×1×0.85:   ${fmt(r.thr85_300)}%
 │   ×2×0.85:   ${fmt(r.thr2_85_300)}%
-│   Volume:    ${fmtVol(r.volume300)}
+│   Volume:    ${fmtNum(r.volume300)}
 └──────────────────────────────────────────┘`.trim();
 }
 
@@ -324,27 +324,27 @@ export function formatNatrResultConsole(r: NatrResult): string {
  */
 export function formatNatrResultTelegram(r: NatrResult): string {
   const fmt = (n: number, d = 4) => n.toFixed(d);
-  const fmtVol = (n: number) => Math.round(n).toLocaleString("ru-RU");
+  const fmtNum = (n: number) => Math.round(n).toLocaleString("ru-RU"); // с пробелами
   const fmtPrice = (n: number) => n < 1 ? n.toPrecision(5) : fmt(n, 2);
   const shortSym = r.symbol.replace("/USDT:USDT", "").replace("/USDT", "");
 
   return `<b>📊 RISK CALCULATOR</b>
 
 <b>${shortSym}</b>  💰 Price: <code>${fmtPrice(r.price)}</code>
-Risk: <b>$${r.risk}</b>  Coef: ${r.coef}
+Risk: <b>$${fmtNum(r.risk)}</b>  Coef: <b>${r.coef}</b>
 
 <b>━━━ L=100 ━━━</b>
 NATR: ${fmt(r.natr100)}%
 NATR×coef: ${fmt(r.natrCoef100)}%
 ×1×0.85: ${fmt(r.thr85_100)}%
 ×2×0.85: ${fmt(r.thr2_85_100)}%
-📦 Volume: <code>${fmtVol(r.volume100)}</code>
+📦 Volume: <code>${fmtNum(r.volume100)}</code>
 
 <b>━━━ L=300 ━━━</b>
 NATR: ${fmt(r.natr300)}%
 NATR×coef: ${fmt(r.natrCoef300)}%
 ×1×0.85: ${fmt(r.thr85_300)}%
 ×2×0.85: ${fmt(r.thr2_85_300)}%
-📦 Volume: <code>${fmtVol(r.volume300)}</code>`;
+📦 Volume: <code>${fmtNum(r.volume300)}</code>`;
 }
 
