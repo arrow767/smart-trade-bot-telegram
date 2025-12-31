@@ -51,6 +51,19 @@ export function parseLine(line: string): ParsedCmd | null {
     if (d === "0") return { kind: "exit" };
   }
 
+  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk> или calc <ticker> <risk>
+  const cmdLower = (p[0] || "").toLowerCase();
+  if ((cmdLower === "r" || cmdLower === "calc" || cmdLower === "risk") && p[1]) {
+    const ticker = p[1].toUpperCase();
+    const riskStr = p[2];
+    const risk = riskStr ? parseHumanUsd(riskStr) : NaN;
+    if (!Number.isFinite(risk) || risk <= 0) {
+      // Если риск не указан - вернём с NaN, обработчик покажет ошибку
+      return { kind: "risk_calc", ticker, risk: NaN };
+    }
+    return { kind: "risk_calc", ticker, risk };
+  }
+
   // Поддержка ручного риска в начале: "50 l xrp ..." или "50$ l ..."
   let riskOverride: number | undefined;
   let idx = 0;

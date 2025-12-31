@@ -245,6 +245,31 @@ export async function runCommand(
     return;
   }
 
+  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk>
+  if (parsed.kind === "risk_calc") {
+    const { ticker, risk } = parsed;
+    if (!Number.isFinite(risk) || risk <= 0) {
+      info(mode === "console" 
+        ? `Неверный ввод. Пример: r xrp 100 (риск $100)` 
+        : `<b>Неверный ввод.</b> Пример: <code>r xrp 100</code> (риск $100)`);
+      return;
+    }
+    try {
+      const { calculateRisk, formatNatrResultConsole, formatNatrResultTelegram } = await import("./NatrCalculator");
+      const result = await calculateRisk(ex, ticker, risk);
+      const formatted = mode === "console" 
+        ? formatNatrResultConsole(result)
+        : formatNatrResultTelegram(result);
+      info(formatted);
+    } catch (e: any) {
+      const errMsg = e?.message || String(e);
+      info(mode === "console" 
+        ? `Ошибка расчёта: ${errMsg}` 
+        : `<b>Ошибка расчёта:</b> ${errMsg}`);
+    }
+    return;
+  }
+
   // Порог для дробления крупных ног + динамические границы из фильтров
   const ENV_CAP_USD = Number(process.env.SPLIT_ENTRY_USD_MAX || process.env.MAX_USD_PER_ENTRY || 0);
   const ALIGN_TO_CURRENT_LEV = String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "1" || String(process.env.SPLIT_ALIGN_TO_CURRENT_LEV || "").toLowerCase() === "true";
