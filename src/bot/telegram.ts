@@ -1163,7 +1163,33 @@ bot.catch(async (err, ctx) => {
   } catch {}
 });
 
-bot.launch().then(async ()=> {
+// ✅ Retry логика для запуска бота с экспоненциальной задержкой
+async function launchBotWithRetry(maxRetries = 10, initialDelayMs = 2000) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[BOT] Попытка подключения к Telegram API... (${attempt}/${maxRetries})`);
+      await bot.launch();
+      console.log(`[BOT] ✅ Telegram bot connected successfully!`);
+      return true;
+    } catch (e: any) {
+      const isNetworkError = e?.code === "ETIMEDOUT" || e?.errno === "ETIMEDOUT" || 
+                             e?.code === "ECONNRESET" || e?.code === "ENOTFOUND" ||
+                             /timeout|network|fetch|ETIMEDOUT/i.test(e?.message || "");
+      
+      if (!isNetworkError || attempt === maxRetries) {
+        console.error(`[BOT] ❌ Не удалось запустить бота после ${attempt} попыток:`, e?.message || e);
+        throw e;
+      }
+      
+      const delay = initialDelayMs * Math.pow(1.5, attempt - 1); // Экспоненциальная задержка
+      console.warn(`[BOT] ⚠️ Попытка ${attempt} не удалась (${e?.code || e?.message}). Повтор через ${Math.round(delay/1000)}с...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  return false;
+}
+
+launchBotWithRetry().then(async ()=> {
   await ex.init(); // Синхронизация времени перед первым использованием
   await ex.loadMarkets();
   
@@ -1179,7 +1205,7 @@ bot.launch().then(async ()=> {
   
   startTaskRecoveryLoop(ex, book, (m) => console.log(m), undefined, notifyTelegram);
   console.log("Telegram bot started.");
-}).catch((e)=>{ console.error(e); });
+}).catch((e)=>{ console.error(e); process.exit(1); });
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
 
