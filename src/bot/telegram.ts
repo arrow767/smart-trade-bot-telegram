@@ -5,9 +5,27 @@ import { BinanceFutures } from "../exch/BinanceFutures";
 import { DEFAULT_PRESET, parseLine, runCommand, TaskBook } from "../core/engine";
 import { banner, formatTradeNotification } from "../core/format";
 import { startTaskRecoveryLoop } from "../core/recovery";
-import { setDefaultResultOrder } from "dns";
+import { setDefaultResultOrder, setServers } from "dns";
 import { listPresets, getPreset, upsertPreset, deletePreset, getDefaultPresetNameBySide, setDefaultPresetBySide, setDefaultPreset } from "../config/trading_config";
-setDefaultResultOrder?.("ipv4first");  // принудительно IPv4 в Node
+
+// ✅ Принудительно IPv4 + Google/Cloudflare DNS для надёжности
+setDefaultResultOrder?.("ipv4first");
+try {
+  setServers(["8.8.8.8", "1.1.1.1", "8.8.4.4"]); // Google + Cloudflare DNS
+} catch (e) {
+  // Игнорируем если не поддерживается
+}
+
+// ✅ Pre-resolve api.telegram.org при старте (разогрев DNS кэша)
+import { lookup } from "dns/promises";
+(async () => {
+  try {
+    const result = await lookup("api.telegram.org", { family: 4 });
+    console.log(`[DNS] api.telegram.org resolved to ${result.address}`);
+  } catch (e) {
+    console.warn("[DNS] Failed to pre-resolve api.telegram.org:", (e as any)?.message);
+  }
+})();
 
 
 const token = process.env.TELEGRAM_BOT_TOKEN!;
