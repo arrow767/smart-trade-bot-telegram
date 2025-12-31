@@ -245,18 +245,20 @@ export async function runCommand(
     return;
   }
 
-  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk>
+  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk> [coef]
   if (parsed.kind === "risk_calc") {
-    const { ticker, risk } = parsed;
+    const { ticker, risk, coef } = parsed;
     if (!Number.isFinite(risk) || risk <= 0) {
       info(mode === "console" 
-        ? `Неверный ввод. Пример: r xrp 100 (риск $100)` 
-        : `<b>Неверный ввод.</b> Пример: <code>r xrp 100</code> (риск $100)`);
+        ? `Неверный ввод. Пример: r xrp 100 [коэф]\n  r xrp 100 0.85` 
+        : `<b>Неверный ввод.</b>\nПример: <code>r xrp 100</code> или <code>r xrp 100 0.85</code>`);
       return;
     }
     try {
-      const { calculateRisk, formatNatrResultConsole, formatNatrResultTelegram } = await import("./NatrCalculator");
-      const result = await calculateRisk(ex, ticker, risk);
+      const { calculateRisk, formatNatrResultConsole, formatNatrResultTelegram, DEFAULT_NATR_CONFIG } = await import("./NatrCalculator");
+      // Если передан коэффициент - используем его, иначе дефолтный
+      const config = coef ? { ...DEFAULT_NATR_CONFIG, coef } : DEFAULT_NATR_CONFIG;
+      const result = await calculateRisk(ex, ticker, risk, config);
       const formatted = mode === "console" 
         ? formatNatrResultConsole(result)
         : formatNatrResultTelegram(result);

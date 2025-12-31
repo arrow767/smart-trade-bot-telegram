@@ -24,7 +24,7 @@ export type ParsedCmd =
   | { kind: "cancel"; id: number }
   | { kind: "cancel_ticker"; symbol: string }
   | { kind: "cancel_all" }
-  | { kind: "risk_calc"; ticker: string; risk: number }
+  | { kind: "risk_calc"; ticker: string; risk: number; coef?: number }
   | { kind: "close"; symbol: string; percent: number }
   | { kind: "edit"; id: number; dir: "l" | "s"; rawTicker: string; legs: TradeLeg[] }
   | { kind: "preset_list" }

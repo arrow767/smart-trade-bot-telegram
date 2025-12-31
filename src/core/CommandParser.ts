@@ -51,17 +51,20 @@ export function parseLine(line: string): ParsedCmd | null {
     if (d === "0") return { kind: "exit" };
   }
 
-  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk> или calc <ticker> <risk>
+  // ✅ НОВОЕ: Risk Calculator - r <ticker> <risk> [coef] или calc <ticker> <risk> [coef]
   const cmdLower = (p[0] || "").toLowerCase();
   if ((cmdLower === "r" || cmdLower === "calc" || cmdLower === "risk") && p[1]) {
     const ticker = p[1].toUpperCase();
     const riskStr = p[2];
     const risk = riskStr ? parseHumanUsd(riskStr) : NaN;
+    // Опциональный коэффициент (поддержка точки и запятой)
+    const coefStr = p[3];
+    const coef = coefStr ? parseNumberToken(coefStr) : undefined;
     if (!Number.isFinite(risk) || risk <= 0) {
       // Если риск не указан - вернём с NaN, обработчик покажет ошибку
-      return { kind: "risk_calc", ticker, risk: NaN };
+      return { kind: "risk_calc", ticker, risk: NaN, coef: undefined };
     }
-    return { kind: "risk_calc", ticker, risk };
+    return { kind: "risk_calc", ticker, risk, coef: Number.isFinite(coef) && coef > 0 ? coef : undefined };
   }
 
   // Поддержка ручного риска в начале: "50 l xrp ..." или "50$ l ..."
