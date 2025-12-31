@@ -25,6 +25,16 @@ const ENABLE_TRADE_NOTIFICATIONS = String(process.env.TELEGRAM_TRADE_NOTIFICATIO
 // Optional proxy agent for Telegram only
 const proxyUrl = (process.env.TELEGRAM_PROXY_URL || "").trim();
 let agent: any = undefined;
+
+// Создаём HTTPS agent с keepAlive для стабильного соединения
+import https from "https";
+const defaultAgent = new https.Agent({
+  keepAlive: true,
+  keepAliveMsecs: 10000,
+  timeout: 60000, // 60 секунд таймаут
+  maxSockets: 10,
+});
+
 if (proxyUrl) {
   try {
     if (/^socks/i.test(proxyUrl)) {
@@ -41,25 +51,22 @@ if (proxyUrl) {
   }
 }
 
+// Используем proxy agent или default agent с keepAlive
+agent = agent || defaultAgent;
+
 // ✅ НОВОЕ: Настройки таймаутов и retry для Telegram
 const TELEGRAM_TIMEOUT = Number(process.env.TELEGRAM_TIMEOUT_MS || 30_000); // 30 секунд по умолчанию
 const TELEGRAM_RETRY_TRIES = Number(process.env.TELEGRAM_RETRY_TRIES || 3);
 const TELEGRAM_RETRY_DELAY = Number(process.env.TELEGRAM_RETRY_DELAY_MS || 1000);
 
-const bot = agent 
-  ? new Telegraf(token, { 
-      telegram: { 
-        agent,
-        apiRoot: process.env.TELEGRAM_API_ROOT || undefined,
-        webhookReply: false, // отключаем webhook reply для стабильности
-      } 
-    }) 
-  : new Telegraf(token, {
-      telegram: {
-        apiRoot: process.env.TELEGRAM_API_ROOT || undefined,
-        webhookReply: false,
-      }
-    });
+// ✅ Всегда используем agent с keepAlive для стабильного соединения
+const bot = new Telegraf(token, { 
+  telegram: { 
+    agent,
+    apiRoot: process.env.TELEGRAM_API_ROOT || undefined,
+    webhookReply: false, // отключаем webhook reply для стабильности
+  } 
+});
 
 // ✅ Дедупликация сообщений — предотвращаем спам одинаковых сообщений
 // ✅ УВЕЛИЧЕНО: окно 30 секунд для защиты от спама в цикле трекинга (каждые 2.5 сек)
