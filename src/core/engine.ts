@@ -251,6 +251,8 @@ export async function runCommand(
     const risk = parsed.risk;
     const customCoef = parsed.coef; // Кастомный коэффициент из команды
     
+    console.log(`[CALC DEBUG] parsed.coef=${customCoef}, type=${typeof customCoef}`);
+    
     if (!Number.isFinite(risk) || risk <= 0) {
       info(mode === "console" 
         ? `Неверный ввод. Пример: r xrp 100 [коэф]\n  r xrp 100 0.85` 
@@ -263,6 +265,7 @@ export async function runCommand(
       const finalCoef = (typeof customCoef === "number" && Number.isFinite(customCoef) && customCoef > 0) 
         ? customCoef 
         : DEFAULT_NATR_CONFIG.coef;
+      console.log(`[CALC DEBUG] finalCoef=${finalCoef}, DEFAULT=${DEFAULT_NATR_CONFIG.coef}`);
       const config = { ...DEFAULT_NATR_CONFIG, coef: finalCoef };
       const result = await calculateRisk(ex, ticker, risk, config);
       const formatted = mode === "console" 
