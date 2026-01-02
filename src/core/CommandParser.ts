@@ -247,10 +247,14 @@ export function parseLine(line: string): ParsedCmd | null {
   if (!rawTicker) return null;
 
   // MARKET-вход с авто-объёмом: l <sym> a [preset|-]
+  // НО: если после `a` идёт число (цена), это ОТЛОЖКА, не маркет!
   const marketAutoToken = p[idx+2]?.toLowerCase();
   const marketAutoMatch = marketAutoToken?.match(/^(a|auto)(?:-(\d+(?:[.,]\d+)?))?$/);
-  if (marketAutoMatch) {
-    // Маркет с авто-объёмом
+  const nextTokenAfterAuto = p[idx+3];
+  const nextIsPrice = nextTokenAfterAuto && Number.isFinite(parseNumberToken(nextTokenAfterAuto)) && parseNumberToken(nextTokenAfterAuto) > 0;
+  
+  if (marketAutoMatch && !nextIsPrice) {
+    // Маркет с авто-объёмом (нет цены после `a`)
     const autoCoef = marketAutoMatch[2] ? parseNumberToken(marketAutoMatch[2]) : undefined;
     const presetArg = p[idx+3] || DEFAULT_PRESET;
     const noPreset = presetArg === "-" || presetArg === "—";
