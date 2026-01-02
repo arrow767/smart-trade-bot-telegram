@@ -583,18 +583,26 @@ bot.action(/PRESET_SHOW\|(.+)/, async (ctx)=>{
     const isDefaultLong = name === defaultLong;
     const isDefaultShort = name === defaultShort;
     
+    // ✅ Форматируем риск в зависимости от типа
+    const riskType = preset.risk_type || "money";
+    const riskDisplay = riskType === "percent" 
+      ? `${preset.trade_risk}% (от депо)` 
+      : `$${preset.trade_risk}`;
+    const riskTypeLabel = riskType === "percent" ? "📊 %" : "💵 $";
+    
     const text = [
       `<b>⚙️ Пресет: ${name}</b>`,
       isDefaultLong ? `<b>⭐ Default Long</b>` : "",
       isDefaultShort ? `<b>⭐ Default Short</b>` : "",
       ``,
-      `<b>Риск:</b> $${preset.trade_risk}`,
+      `<b>Риск:</b> ${riskDisplay}`,
       `<b>Take Profit:</b> ${preset.take_profit.join(", ")}`,
       `<b>Ratio:</b> ${preset.take_profit_ratio.join(", ")}%`,
     ].filter(Boolean).join("\n");
     
     const buttons = [
-      [Markup.button.callback(`📝 Риск ($${preset.trade_risk})`, `PRESET_EDIT|${name}|risk`)],
+      [Markup.button.callback(`📝 Риск (${riskDisplay})`, `PRESET_EDIT|${name}|risk`)],
+      [Markup.button.callback(`🔄 Тип риска: ${riskTypeLabel}`, `PRESET_TOGGLE_RISK_TYPE|${name}`)],
       [Markup.button.callback(`📝 TP (${preset.take_profit.join(",")})`, `PRESET_EDIT|${name}|tp`)],
       [Markup.button.callback(`📝 Ratio (${preset.take_profit_ratio.join(",")})`, `PRESET_EDIT|${name}|ratio`)],
       [Markup.button.callback(isDefaultLong ? "⭐ Default Long" : "⭐ Сделать Default Long", isDefaultLong ? "NOOP" : `PRESET_DEFAULT|long|${name}`)],
@@ -639,6 +647,66 @@ bot.action(/PRESET_EDIT\|(.+)\|(.+)/, async (ctx)=>{
     );
   } catch (e:any) {
     console.error("PRESET_EDIT action error:", e);
+  }
+});
+
+// ✅ НОВОЕ: PRESET_TOGGLE_RISK_TYPE - переключение типа риска (money <-> percent)
+bot.action(/PRESET_TOGGLE_RISK_TYPE\|(.+)/, async (ctx)=>{
+  try {
+    if (!isAllowed(ctx)) return deny(ctx);
+    await ctx.answerCbQuery();
+    
+    const name = ctx.match![1];
+    const preset = await getPreset(name);
+    
+    // Переключаем тип
+    const currentType = preset.risk_type || "money";
+    const newType = currentType === "money" ? "percent" : "money";
+    
+    await upsertPreset({ ...preset, risk_type: newType });
+    
+    // Перезагружаем пресет для отображения
+    const updatedPreset = await getPreset(name);
+    const defaultLong = await getDefaultPresetNameBySide("long");
+    const defaultShort = await getDefaultPresetNameBySide("short");
+    const isDefaultLong = name === defaultLong;
+    const isDefaultShort = name === defaultShort;
+    
+    const riskType = updatedPreset.risk_type || "money";
+    const riskDisplay = riskType === "percent" 
+      ? `${updatedPreset.trade_risk}% (от депо)` 
+      : `$${updatedPreset.trade_risk}`;
+    const riskTypeLabel = riskType === "percent" ? "📊 %" : "💵 $";
+    
+    const text = [
+      `<b>⚙️ Пресет: ${name}</b>`,
+      isDefaultLong ? `<b>⭐ Default Long</b>` : "",
+      isDefaultShort ? `<b>⭐ Default Short</b>` : "",
+      ``,
+      `<b>Риск:</b> ${riskDisplay}`,
+      `<b>Take Profit:</b> ${updatedPreset.take_profit.join(", ")}`,
+      `<b>Ratio:</b> ${updatedPreset.take_profit_ratio.join(", ")}%`,
+    ].filter(Boolean).join("\n");
+    
+    const buttons = [
+      [Markup.button.callback(`📝 Риск (${riskDisplay})`, `PRESET_EDIT|${name}|risk`)],
+      [Markup.button.callback(`🔄 Тип риска: ${riskTypeLabel}`, `PRESET_TOGGLE_RISK_TYPE|${name}`)],
+      [Markup.button.callback(`📝 TP (${updatedPreset.take_profit.join(",")})`, `PRESET_EDIT|${name}|tp`)],
+      [Markup.button.callback(`📝 Ratio (${updatedPreset.take_profit_ratio.join(",")})`, `PRESET_EDIT|${name}|ratio`)],
+      [Markup.button.callback(isDefaultLong ? "⭐ Default Long" : "⭐ Сделать Default Long", isDefaultLong ? "NOOP" : `PRESET_DEFAULT|long|${name}`)],
+      [Markup.button.callback(isDefaultShort ? "⭐ Default Short" : "⭐ Сделать Default Short", isDefaultShort ? "NOOP" : `PRESET_DEFAULT|short|${name}`)],
+      [
+        Markup.button.callback("🗑 Удалить", `PRESET_DELETE|${name}`),
+        Markup.button.callback("« Назад", "PRESETS")
+      ],
+    ];
+    
+    // Редактируем текущее сообщение вместо отправки нового
+    await ctx.editMessageText(text, { parse_mode:"HTML", ...Markup.inlineKeyboard(buttons) });
+    
+  } catch (e:any) {
+    console.error("PRESET_TOGGLE_RISK_TYPE action error:", e);
+    await ctx.reply(`Ошибка: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" });
   }
 });
 
