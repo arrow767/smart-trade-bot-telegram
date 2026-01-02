@@ -308,6 +308,10 @@ export function startTaskRecoveryLoop(
   const orphanGraceMs = Number(process.env.RECOVERY_ORPHAN_GRACE_MS || 60_000);
   const emptySinceBySymbol = new Map<string, number>();
 
+  // ✅ НОВОЕ: Задержка между обработкой задач для rate limiting
+  const taskDelayMs = Number(process.env.RECOVERY_TASK_DELAY_MS || 500);
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
   // ✅ НОВОЕ: Включить очистку ордеров если задач нет
   const cleanupOrphanOrdersEnabled = String(process.env.RECOVERY_CLEANUP_ORPHAN_ORDERS || "true").toLowerCase() === "true" 
     || String(process.env.RECOVERY_CLEANUP_ORPHAN_ORDERS || "true") === "1";
@@ -359,6 +363,9 @@ export function startTaskRecoveryLoop(
             log(`🧹 Recovery: удалил задачу с ошибкой #${errorTask.id} по ${symbol} (нет позиций и ордеров)`);
           }
         } catch {}
+        
+        // ✅ Rate limiting: задержка между задачами
+        await sleep(taskDelayMs);
       }
       
       // ✅ КРИТИЧНО: Проверка статуса entry ордеров для waiting_fill задач
@@ -467,6 +474,9 @@ export function startTaskRecoveryLoop(
           // Не ломаем recovery если одна задача упала
           console.warn(`[WARN] Recovery: ошибка проверки entry ордеров для #${task.id}: ${e?.message || e}`);
         }
+        
+        // ✅ Rate limiting: задержка между задачами
+        await sleep(taskDelayMs);
       }
       
       // ✅ НОВОЕ: Проверка на orphan ордера (ордера без задач)
@@ -549,6 +559,8 @@ export function startTaskRecoveryLoop(
               }
             }
           }
+          // ✅ Rate limiting: задержка между символами
+          await sleep(taskDelayMs);
           continue;
         }
 
@@ -639,13 +651,16 @@ export function startTaskRecoveryLoop(
           emptySinceBySymbol.delete(symbol);
           log(`🧹 Recovery: висячие задачи по ${symbol} удалены (нет позиций и ордеров > ${Math.round(Math.max(5_000, orphanGraceMs) / 1000)}s)`);
         }
+        
+        // ✅ Rate limiting: задержка между символами
+        await sleep(taskDelayMs);
       }
     } catch {}
   };
 
   // ✅ КРИТИЧНО: Немедленная проверка при старте (не ждём intervalMs)
   // Это гарантирует что существующие задачи будут обработаны сразу после перезапуска
-  log(`🔄 Recovery: запуск немедленной проверки задач...`);
+  log(`🔄 Recovery: запуск (interval=${intervalMs}ms, taskDelay=${taskDelayMs}ms)...`);
   runRecoveryCheck().then(() => {
     log(`✅ Recovery: начальная проверка завершена`);
   }).catch((e) => {
