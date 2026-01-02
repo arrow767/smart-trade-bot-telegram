@@ -766,33 +766,90 @@ export async function runCommand(
   if (parsed.kind === "tasks") {
     const allTasks = book.list();
     
-    // ✅ Собираем символы задач, у которых нет сохранённых цен
-    const tasksNeedingPrices = allTasks.filter(t => 
-      (!t.entryPrices || t.entryPrices.length === 0) && 
-      t.entryOrderIds && t.entryOrderIds.length > 0
-    );
+    // Собираем все уникальные символы
+    const allSymbols = [...new Set(allTasks.map(t => t.symbolCcxt))];
     
-    // Загружаем цены из открытых ордеров
-    const pricesMap = new Map<number, number[]>();
-    const symbolsToFetch = [...new Set(tasksNeedingPrices.map(t => t.symbolCcxt))];
+    // Загружаем entry цены и SL/TP цены для всех символов
+    const entryPricesMap = new Map<number, number[]>();
+    const slPriceMap = new Map<number, number>();
+    const tpPricesMap = new Map<number, number[]>();
     
-    for (const sym of symbolsToFetch) {
+    for (const sym of allSymbols) {
       try {
+        // Обычные ордера (entry лимитки)
         const open = (await ex.fetchOpenOrders(sym)) as any[];
-        const tasksForSym = tasksNeedingPrices.filter(t => t.symbolCcxt === sym);
+        const tasksForSym = allTasks.filter(t => t.symbolCcxt === sym);
+        
         for (const task of tasksForSym) {
-          const entryIdSet = new Set((task.entryOrderIds || []).map(String));
-          const prices: number[] = [];
-          for (const o of open) {
-            const orderId = String(o.id || o.info?.orderId || "");
-            if (entryIdSet.has(orderId)) {
-              const price = Number(o.price ?? o.info?.price ?? 0);
-              const stopPrice = Number(o.stopPrice ?? o.info?.stopPrice ?? 0);
-              const p = price > 0 ? price : stopPrice;
-              if (p > 0) prices.push(p);
+          // Entry prices
+          if (!task.entryPrices || task.entryPrices.length === 0) {
+            const entryIdSet = new Set((task.entryOrderIds || []).map(String));
+            const prices: number[] = [];
+            for (const o of open) {
+              const orderId = String(o.id || o.info?.orderId || "");
+              if (entryIdSet.has(orderId)) {
+                const price = Number(o.price ?? o.info?.price ?? 0);
+                const stopPrice = Number(o.stopPrice ?? o.info?.stopPrice ?? 0);
+                const p = price > 0 ? price : stopPrice;
+                if (p > 0) prices.push(p);
+              }
+            }
+            if (prices.length > 0) entryPricesMap.set(task.id, prices);
+          }
+        }
+        
+        // Algo Orders (SL/TP) - STOP_MARKET, TAKE_PROFIT_MARKET
+        const algoOrders = await ex.fetchOpenAlgoOrders(sym);
+        for (const ao of algoOrders) {
+          const orderType = String(ao.orderType || ao.type || "").toUpperCase();
+          const triggerPrice = Number(ao.triggerPrice || ao.stopPrice || 0);
+          const side = String(ao.side || "").toLowerCase();
+          
+          // Определяем какой задаче принадлежит этот ордер (по символу и направлению)
+          for (const task of tasksForSym) {
+            if (task.status !== "live" && task.status !== "filled") continue;
+            
+            // SL: STOP_MARKET с противоположной стороной
+            if (orderType.includes("STOP") && !orderType.includes("TAKE_PROFIT")) {
+              const isSlForLong = task.side === "long" && side === "sell";
+              const isSlForShort = task.side === "short" && side === "buy";
+              if ((isSlForLong || isSlForShort) && triggerPrice > 0) {
+                slPriceMap.set(task.id, triggerPrice);
+              }
+            }
+            
+            // TP: TAKE_PROFIT_MARKET или reduceOnly LIMIT
+            if (orderType.includes("TAKE_PROFIT")) {
+              const isTpForLong = task.side === "long" && side === "sell";
+              const isTpForShort = task.side === "short" && side === "buy";
+              if ((isTpForLong || isTpForShort) && triggerPrice > 0) {
+                const existing = tpPricesMap.get(task.id) || [];
+                existing.push(triggerPrice);
+                tpPricesMap.set(task.id, existing);
+              }
             }
           }
-          if (prices.length > 0) pricesMap.set(task.id, prices);
+        }
+        
+        // Также проверяем reduceOnly LIMIT ордера как TP
+        for (const o of open) {
+          const isReduceOnly = o.info?.reduceOnly === true || o.info?.reduceOnly === "true";
+          if (!isReduceOnly) continue;
+          const price = Number(o.price ?? o.info?.price ?? 0);
+          const side = String(o.side || "").toLowerCase();
+          
+          for (const task of tasksForSym) {
+            if (task.status !== "live" && task.status !== "filled") continue;
+            const isTpForLong = task.side === "long" && side === "sell";
+            const isTpForShort = task.side === "short" && side === "buy";
+            if ((isTpForLong || isTpForShort) && price > 0) {
+              const existing = tpPricesMap.get(task.id) || [];
+              if (!existing.includes(price)) {
+                existing.push(price);
+                tpPricesMap.set(task.id, existing);
+              }
+            }
+          }
         }
       } catch {}
     }
@@ -801,7 +858,9 @@ export async function runCommand(
       id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
       created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
-      entryPrices: t.entryPrices || pricesMap.get(t.id), // цены из task или из ордеров
+      entryPrices: t.entryPrices || entryPricesMap.get(t.id),
+      slPrice: slPriceMap.get(t.id),
+      tpPrices: tpPricesMap.get(t.id),
     }));
     info(formatTasks(mode, rows));
     return;
@@ -927,13 +986,60 @@ export async function runCommand(
       riskUsd = presetForRisk.trade_risk;
     } catch {}
 
-    // ✅ НОВОЕ: Если нет сохранённых цен - извлекаем из entryDetails
+    // Если нет сохранённых цен - извлекаем из entryDetails
     let entryPrices = t.entryPrices;
     if ((!entryPrices || entryPrices.length === 0) && entryDetails.length > 0) {
       entryPrices = entryDetails
         .map(ed => ed.price || ed.stopPrice)
         .filter((p): p is number => typeof p === "number" && p > 0);
     }
+
+    // Загружаем SL/TP цены из Algo Orders
+    let slPrice: number | undefined;
+    let tpPrices: number[] = [];
+    
+    try {
+      const algoOrders = await ex.fetchOpenAlgoOrders(t.symbolCcxt);
+      const openOrders = (await ex.fetchOpenOrders(t.symbolCcxt)) as any[];
+      
+      for (const ao of algoOrders) {
+        const orderType = String(ao.orderType || ao.type || "").toUpperCase();
+        const triggerPrice = Number(ao.triggerPrice || ao.stopPrice || 0);
+        const side = String(ao.side || "").toLowerCase();
+        
+        // SL: STOP_MARKET с противоположной стороной
+        if (orderType.includes("STOP") && !orderType.includes("TAKE_PROFIT")) {
+          const isSlForLong = t.side === "long" && side === "sell";
+          const isSlForShort = t.side === "short" && side === "buy";
+          if ((isSlForLong || isSlForShort) && triggerPrice > 0) {
+            slPrice = triggerPrice;
+          }
+        }
+        
+        // TP: TAKE_PROFIT_MARKET
+        if (orderType.includes("TAKE_PROFIT")) {
+          const isTpForLong = t.side === "long" && side === "sell";
+          const isTpForShort = t.side === "short" && side === "buy";
+          if ((isTpForLong || isTpForShort) && triggerPrice > 0) {
+            tpPrices.push(triggerPrice);
+          }
+        }
+      }
+      
+      // Также проверяем reduceOnly LIMIT ордера как TP
+      for (const o of openOrders) {
+        const isReduceOnly = o.info?.reduceOnly === true || o.info?.reduceOnly === "true";
+        if (!isReduceOnly) continue;
+        const price = Number(o.price ?? o.info?.price ?? 0);
+        const side = String(o.side || "").toLowerCase();
+        
+        const isTpForLong = t.side === "long" && side === "sell";
+        const isTpForShort = t.side === "short" && side === "buy";
+        if ((isTpForLong || isTpForShort) && price > 0 && !tpPrices.includes(price)) {
+          tpPrices.push(price);
+        }
+      }
+    } catch {}
 
     info(
       formatTaskInfo(mode, {
@@ -944,8 +1050,10 @@ export async function runCommand(
         entryOrderIds: t.entryOrderIds, error: t.error,
         plannedQty: plannedQty || undefined,
         riskUsd,
-        entryPrices, // цены входов (из task или из entryDetails)
+        entryPrices,
         entryDetails: entryDetails.length ? entryDetails : undefined,
+        slPrice,
+        tpPrices: tpPrices.length > 0 ? tpPrices : undefined,
       })
     );
     return;
