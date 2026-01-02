@@ -384,17 +384,6 @@ export async function runCommand(
     
     // Хелпер для парсинга Algo Order в общий формат
     const parseAlgoOrder = (ao: any, sym?: string) => {
-      // ✅ DEBUG: логируем структуру Algo Order
-      console.log(`[DEBUG] Algo Order structure:`, JSON.stringify({
-        type: ao.type,
-        strategyType: ao.strategyType,
-        origType: ao.origType,
-        orderType: ao.orderType,
-        symbol: ao.symbol,
-        algoId: ao.algoId,
-        allKeys: Object.keys(ao)
-      }, null, 2));
-      
       let datetime = "";
       try {
         const timestamp = Number(ao.bookTime || ao.updateTime || ao.time || 0);
@@ -403,8 +392,8 @@ export async function runCommand(
         }
       } catch {}
       
-      // Возвращаем реальный тип ордера от биржи
-      const orderType = String(ao.type || ao.strategyType || "UNKNOWN").toUpperCase();
+      // Возвращаем реальный тип ордера от биржи (поле orderType для Algo Orders)
+      const orderType = String(ao.orderType || ao.type || ao.strategyType || "UNKNOWN").toUpperCase();
       return {
         id: String(ao.algoId || ao.clientAlgoId || ao.orderId || ""),
         symbol: sym || String(ao.symbol || ""),
@@ -426,17 +415,6 @@ export async function runCommand(
         // Обычные ордера
         const open = (await ex.fetchOpenOrders(parsed.symbol)) as any[];
         for (const o of open) {
-          // ✅ DEBUG: логируем структуру ордера для отладки типа
-          console.log(`[DEBUG] Order structure:`, JSON.stringify({
-            type: o.type,
-            "info.type": o.info?.type,
-            "info.origType": o.info?.origType,
-            "info.orderType": o.info?.orderType,
-            symbol: o.symbol,
-            id: o.id,
-            allInfoKeys: o.info ? Object.keys(o.info) : []
-          }, null, 2));
-          
           // Получаем реальный тип ордера: сначала raw от Binance (info.type), потом CCXT (o.type)
           // CCXT может возвращать в разных полях: info.type (raw Binance), type (normalized), info.origType
           const rawType = o.info?.type || o.info?.origType || "";
@@ -468,16 +446,6 @@ export async function runCommand(
         // Запрашиваем ВСЕ ордера со всех символов
         const allOrders = await ex.fetchAllOpenOrdersAcrossSymbols();
         for (const o of allOrders) {
-          // ✅ DEBUG: логируем структуру ордера (raw Binance)
-          console.log(`[DEBUG] Raw order:`, JSON.stringify({
-            type: o.type,
-            origType: o.origType,
-            orderType: o.orderType,
-            symbol: o.symbol,
-            orderId: o.orderId,
-            allKeys: Object.keys(o)
-          }, null, 2));
-          
           // Парсим время безопасно
           let datetime = "";
           try {
