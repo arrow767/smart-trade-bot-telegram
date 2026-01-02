@@ -384,6 +384,17 @@ export async function runCommand(
     
     // Хелпер для парсинга Algo Order в общий формат
     const parseAlgoOrder = (ao: any, sym?: string) => {
+      // ✅ DEBUG: логируем структуру Algo Order
+      console.log(`[DEBUG] Algo Order structure:`, JSON.stringify({
+        type: ao.type,
+        strategyType: ao.strategyType,
+        origType: ao.origType,
+        orderType: ao.orderType,
+        symbol: ao.symbol,
+        algoId: ao.algoId,
+        allKeys: Object.keys(ao)
+      }, null, 2));
+      
       let datetime = "";
       try {
         const timestamp = Number(ao.bookTime || ao.updateTime || ao.time || 0);
