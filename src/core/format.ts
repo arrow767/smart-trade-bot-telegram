@@ -381,12 +381,14 @@ export function banner(mode: UIMode, main: string, sub?: string) {
 }
 
 // ===== НОВОЕ: формат таблицы ордеров =====
+// Реальные типы ордеров Binance:
+// LIMIT, MARKET, STOP, STOP_MARKET, TAKE_PROFIT, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET
 export function formatOrders(
   mode: UIMode,
   rows: Array<{
     id: string;
     symbol: string;
-    kind: "LIMIT" | "STOP" | "MARKET";
+    kind: string; // реальный тип ордера от биржи
     side: "buy" | "sell";
     qty: number;
     price?: number;
@@ -402,20 +404,28 @@ export function formatOrders(
   }
 
   const items = rows.map(r => {
-    // Для STOP ордеров используем stopPrice, для LIMIT - price, для MARKET - не показываем
+    // Определяем какую цену показывать:
+    // - LIMIT: price
+    // - STOP, STOP_MARKET, TAKE_PROFIT, TAKE_PROFIT_MARKET: stopPrice
+    // - MARKET: нет цены
     let px: number | string = 0;
-    if (r.kind === "STOP" && r.stopPrice && r.stopPrice > 0) {
-      px = r.stopPrice;
-    } else if (r.kind === "LIMIT" && r.price && r.price > 0) {
-      px = r.price;
-    } else if (r.kind === "MARKET") {
+    const kindUpper = r.kind.toUpperCase();
+    
+    if (kindUpper === "LIMIT") {
+      px = (r.price && r.price > 0) ? r.price : "-";
+    } else if (kindUpper.includes("STOP") || kindUpper.includes("TAKE_PROFIT")) {
+      px = (r.stopPrice && r.stopPrice > 0) ? r.stopPrice : "-";
+    } else if (kindUpper === "MARKET") {
       px = "-"; // маркет не имеет цены
+    } else {
+      // Неизвестный тип - пытаемся найти любую цену
+      px = (r.stopPrice && r.stopPrice > 0) ? r.stopPrice : (r.price && r.price > 0 ? r.price : "-");
     }
     
     return {
       id: r.id,
       sym: shortSymbol(r.symbol).toUpperCase(),
-      kind: r.kind,
+      kind: r.kind, // показываем реальный тип
       side: r.side.toLowerCase() === "buy" ? "B" : "S",
       qty: fix3(r.qty),
       px,

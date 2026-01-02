@@ -377,7 +377,7 @@ export async function runCommand(
   // --- НОВОЕ: просмотр ордеров ---
   if (parsed.kind === "orders") {
     const rows: Array<{
-      id: string; symbol: string; kind: "LIMIT"|"STOP"|"MARKET"; side: "buy"|"sell";
+      id: string; symbol: string; kind: string; side: "buy"|"sell";
       qty: number; price?: number; stopPrice?: number; reduceOnly?: boolean;
       closePosition?: boolean; datetime?: string; status?: string;
     }> = [];
@@ -392,11 +392,12 @@ export async function runCommand(
         }
       } catch {}
       
-      const orderType = String(ao.type || ao.strategyType || "").toUpperCase();
+      // Возвращаем реальный тип ордера от биржи
+      const orderType = String(ao.type || ao.strategyType || "UNKNOWN").toUpperCase();
       return {
         id: String(ao.algoId || ao.clientAlgoId || ao.orderId || ""),
         symbol: sym || String(ao.symbol || ""),
-        kind: orderType.includes("STOP") ? "STOP" as const : (orderType.includes("LIMIT") ? "LIMIT" as const : "MARKET" as const),
+        kind: orderType, // реальный тип: STOP_MARKET, TAKE_PROFIT_MARKET и т.д.
         side: (String(ao.side || "buy").toLowerCase() === "buy" ? "buy" : "sell") as "buy" | "sell",
         qty: Number(ao.quantity || ao.origQty || 0) || 0,
         price: Number(ao.price || 0) || undefined,
@@ -414,10 +415,12 @@ export async function runCommand(
         // Обычные ордера
         const open = (await ex.fetchOpenOrders(parsed.symbol)) as any[];
         for (const o of open) {
+          // Получаем реальный тип ордера от биржи
+          const orderType = String(o.type || o.info?.type || "UNKNOWN").toUpperCase();
           rows.push({
             id: String(o.id || o.info?.orderId || ""),
             symbol: parsed.symbol,
-            kind: isStopOrder(o) ? "STOP" : (isLimitOrder(o) ? "LIMIT" : "MARKET"),
+            kind: orderType, // реальный тип: LIMIT, STOP, STOP_MARKET и т.д.
             side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
             qty: Number(o.amount ?? o.info?.origQty ?? 0) || 0,
             price: Number(o.price ?? o.info?.price ?? 0) || undefined,
@@ -449,19 +452,13 @@ export async function runCommand(
             }
           } catch {}
           
-          // ✅ Улучшенное определение типа ордера
-          const orderType = String(o.type || "").toUpperCase();
-          let kind: "LIMIT" | "STOP" | "MARKET" = "MARKET";
-          if (orderType.includes("STOP") || orderType.includes("TAKE_PROFIT") || Number(o.stopPrice || 0) > 0) {
-            kind = "STOP";
-          } else if (orderType.includes("LIMIT") || (Number(o.price || 0) > 0 && orderType !== "MARKET")) {
-            kind = "LIMIT";
-          }
+          // Реальный тип ордера от биржи
+          const orderType = String(o.type || "UNKNOWN").toUpperCase();
           
           rows.push({
             id: String(o.orderId || ""),
             symbol: String(o.symbol || ""),
-            kind,
+            kind: orderType, // реальный тип: LIMIT, STOP_MARKET, TAKE_PROFIT_MARKET и т.д.
             side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
             qty: Number(o.origQty ?? 0) || 0,
             price: Number(o.price ?? 0) || undefined,
