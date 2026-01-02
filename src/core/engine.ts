@@ -449,10 +449,19 @@ export async function runCommand(
             }
           } catch {}
           
+          // ✅ Улучшенное определение типа ордера
+          const orderType = String(o.type || "").toUpperCase();
+          let kind: "LIMIT" | "STOP" | "MARKET" = "MARKET";
+          if (orderType.includes("STOP") || orderType.includes("TAKE_PROFIT") || Number(o.stopPrice || 0) > 0) {
+            kind = "STOP";
+          } else if (orderType.includes("LIMIT") || (Number(o.price || 0) > 0 && orderType !== "MARKET")) {
+            kind = "LIMIT";
+          }
+          
           rows.push({
             id: String(o.orderId || ""),
             symbol: String(o.symbol || ""),
-            kind: String(o.type || "").toUpperCase().includes("STOP") ? "STOP" : (String(o.type || "").toUpperCase().includes("LIMIT") ? "LIMIT" : "MARKET"),
+            kind,
             side: (String(o.side||"buy").toLowerCase() === "buy" ? "buy" : "sell"),
             qty: Number(o.origQty ?? 0) || 0,
             price: Number(o.price ?? 0) || undefined,
@@ -852,20 +861,33 @@ export async function runCommand(
     try {
       if (t.entryOrderIds && t.entryOrderIds.length) {
         const open = (await ex.fetchOpenOrders(t.symbolCcxt)) as any[];
+        // ✅ Создаём Set для быстрого поиска (и String для сравнения)
+        const entryIdSet = new Set(t.entryOrderIds.map(String));
+        
         for (const o of open) {
-          if (!o.id || !t.entryOrderIds.includes(o.id)) continue;
+          // ✅ Проверяем по нескольким полям ID
+          const orderId = String(o.id || o.info?.orderId || "");
+          if (!orderId || !entryIdSet.has(orderId)) continue;
+          
           const qty = Number(o.amount ?? o.info?.origQty ?? 0) || undefined;
           plannedQty += qty || 0;
+          
+          // ✅ Берём цену из всех возможных полей
+          const price = Number(o.price ?? o.info?.price ?? 0) || undefined;
+          const stopPrice = Number(o.stopPrice ?? o.info?.stopPrice ?? 0) || undefined;
+          
           entryDetails.push({
-            id: String(o.id),
-            type: String(o.type || o.info?.type || ""),
-            price: Number(o.price ?? o.info?.price ?? 0) || undefined,
-            stopPrice: Number(o.info?.stopPrice ?? 0) || undefined,
+            id: orderId,
+            type: String(o.type || o.info?.type || "LIMIT"),
+            price,
+            stopPrice,
             qty,
           });
         }
       }
-    } catch {}
+    } catch (e: any) {
+      console.log(`[DEBUG] task_info fetchOpenOrders error: ${e?.message || e}`);
+    }
 
     let riskUsd: number | undefined = undefined;
     try {

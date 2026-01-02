@@ -659,11 +659,13 @@ bot.action(/PRESET_TOGGLE_RISK_TYPE\|(.+)/, async (ctx)=>{
     const name = ctx.match![1];
     const preset = await getPreset(name);
     
-    // Переключаем тип
+    // Переключаем тип и ставим дефолтное значение
     const currentType = preset.risk_type || "money";
     const newType = currentType === "money" ? "percent" : "money";
+    // ✅ При переключении ставим дефолт: 1% или $100
+    const newRisk = newType === "percent" ? 1 : 100;
     
-    await upsertPreset({ ...preset, risk_type: newType });
+    await upsertPreset({ ...preset, risk_type: newType, trade_risk: newRisk });
     
     // Перезагружаем пресет для отображения
     const updatedPreset = await getPreset(name);
@@ -971,7 +973,9 @@ bot.on("text", async (ctx)=>{
       const current = await getPreset(name);
       
       if (field === "risk") {
-        const risk = Number(text);
+        // ✅ Парсим число (поддержка "1%", "1", "100$")
+        const cleanText = text.replace(/[%$]/g, "").replace(",", ".").trim();
+        const risk = Number(cleanText);
         if (isNaN(risk) || risk <= 0) {
           return ctx.reply(`❌ Риск должен быть положительным числом\n\nПопробуйте ещё раз:`, { parse_mode:"HTML" });
         }
@@ -979,8 +983,9 @@ bot.on("text", async (ctx)=>{
         await upsertPreset({ ...current, trade_risk: risk });
         editState.delete(userId);
         
+        const riskDisplay = current.risk_type === "percent" ? `${risk}%` : `$${risk}`;
         await ctx.reply(
-          `✅ Риск обновлён: <b>$${risk}</b>`,
+          `✅ Риск обновлён: <b>${riskDisplay}</b>`,
           { parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback(`« К ${name}`, `PRESET_SHOW|${name}`)]]) }
         );
         return;
