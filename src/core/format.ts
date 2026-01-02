@@ -401,18 +401,30 @@ export function formatOrders(
     return mode === "console" ? lineBox(["Открытых ордеров нет."], "ORDERS") : monoBlock("Открытых ордеров нет.");
   }
 
-  const items = rows.map(r => ({
-    id: r.id,
-    sym: shortSymbol(r.symbol).toUpperCase(),
-    kind: r.kind,
-    side: r.side.toLowerCase() === "buy" ? "B" : "S",
-    qty: fix3(r.qty),
-    px: r.kind === "STOP" ? (r.stopPrice ?? 0) : (r.price ?? 0),
-    ro: r.reduceOnly ? "RO" : "",
-    cp: r.closePosition ? "CP" : "",
-    dt: formatTime(r.datetime || ""),
-    st: r.status || ""
-  }));
+  const items = rows.map(r => {
+    // Для STOP ордеров используем stopPrice, для LIMIT - price, для MARKET - не показываем
+    let px: number | string = 0;
+    if (r.kind === "STOP" && r.stopPrice && r.stopPrice > 0) {
+      px = r.stopPrice;
+    } else if (r.kind === "LIMIT" && r.price && r.price > 0) {
+      px = r.price;
+    } else if (r.kind === "MARKET") {
+      px = "-"; // маркет не имеет цены
+    }
+    
+    return {
+      id: r.id,
+      sym: shortSymbol(r.symbol).toUpperCase(),
+      kind: r.kind,
+      side: r.side.toLowerCase() === "buy" ? "B" : "S",
+      qty: fix3(r.qty),
+      px,
+      ro: r.reduceOnly ? "RO" : "",
+      cp: r.closePosition ? "CP" : "",
+      dt: formatTime(r.datetime || ""),
+      st: r.status || ""
+    };
+  });
 
   // Телеграм: карточки (устойчивые к узким экранам и эмодзи)
   if (mode === "telegram") {

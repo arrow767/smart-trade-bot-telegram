@@ -873,6 +873,14 @@ export async function runCommand(
       riskUsd = presetForRisk.trade_risk;
     } catch {}
 
+    // ✅ НОВОЕ: Если нет сохранённых цен - извлекаем из entryDetails
+    let entryPrices = t.entryPrices;
+    if ((!entryPrices || entryPrices.length === 0) && entryDetails.length > 0) {
+      entryPrices = entryDetails
+        .map(ed => ed.price || ed.stopPrice)
+        .filter((p): p is number => typeof p === "number" && p > 0);
+    }
+
     info(
       formatTaskInfo(mode, {
         id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
@@ -882,7 +890,7 @@ export async function runCommand(
         entryOrderIds: t.entryOrderIds, error: t.error,
         plannedQty: plannedQty || undefined,
         riskUsd,
-        entryPrices: t.entryPrices, // ✅ НОВОЕ: цены входов
+        entryPrices, // цены входов (из task или из entryDetails)
         entryDetails: entryDetails.length ? entryDetails : undefined,
       })
     );
