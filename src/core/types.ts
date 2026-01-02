@@ -13,7 +13,8 @@ export type ParsedCmd =
       presetAuto?: boolean;
       dryRun: boolean;
       market?: { usd: number } | null;
-      riskUsdOverride?: number;
+      riskUsdOverride?: number;        // риск в $ (переопределяет пресет)
+      riskPercentOverride?: number;    // ✅ НОВОЕ: риск в % от депозита (переопределяет пресет)
       noPreset?: boolean; // ✅ НОВОЕ: отключение автоматических SL/TP
     }
   | { kind: "help" }
@@ -33,6 +34,7 @@ export type ParsedCmd =
       kind: "preset_set";
       name: string;
       risk?: number;
+      riskType?: "money" | "percent"; // ✅ НОВОЕ: тип риска
       tp?: number[];
       ratio?: number[];
       // legacy: установить дефолт на обе стороны

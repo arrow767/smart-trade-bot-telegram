@@ -1,9 +1,12 @@
 import { promises as fs } from "fs";
 import path from "path";
 
+export type RiskType = "money" | "percent";
+
 export type TradingPreset = {
   config_name: string;          // имя пресета
-  trade_risk: number;           // риск в $
+  trade_risk: number;           // риск ($ или % в зависимости от riskType)
+  risk_type?: RiskType;         // "money" = фиксированная сумма, "percent" = % от депозита
   take_profit: number[];        // мультипликаторы R: [3,5,7]
   take_profit_ratio: number[];  // в %, например [35,30,35]
 };
@@ -25,6 +28,7 @@ const DEFAULT_PRESET_NAME = "4h";
 const DEFAULT_PRESET: TradingPreset = {
   config_name: DEFAULT_PRESET_NAME,
   trade_risk: 100,
+  risk_type: "money",  // по умолчанию фиксированная сумма
   take_profit: [3, 5, 7],
   take_profit_ratio: [35, 30, 35],
 };
@@ -129,6 +133,7 @@ export async function upsertPreset(preset: TradingPreset): Promise<void> {
   cfg.presets[preset.config_name] = {
     config_name: preset.config_name,
     trade_risk: Number(preset.trade_risk) || 0,
+    risk_type: preset.risk_type || "money",
     take_profit: [...preset.take_profit].map(Number),
     take_profit_ratio: [...preset.take_profit_ratio].map(Number),
   };

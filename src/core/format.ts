@@ -128,21 +128,73 @@ export function formatDeposit(
     exposureUsd?: number; leverage?: number;
   }
 ) {
-  // Табличный компактный стиль в Telegram, табличный блок в консоли
-  const futRow = `futures:  total=${p.total.toFixed(2)}  free=${p.free.toFixed(2)}  used=${p.used.toFixed(2)}`;
-  const unrealRow = `unrealized: ${mode === "console" ? fmtPnl(mode, p.unreal) : `${p.unreal >= 0 ? "+" : ""}${p.unreal.toFixed(2)}$`}`;
-  const lines: string[] = [futRow, unrealRow];
-  if (typeof p.exposureUsd === "number") {
-    const levStr = typeof p.leverage === "number" && p.leverage > 0 ? `  lev≈${p.leverage.toFixed(2)}x` : "";
-    lines.push(`positions value: ${p.exposureUsd.toFixed(2)}$${levStr}`);
+  const fmtNum = (n: number) => n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const pnlSign = p.unreal >= 0 ? "+" : "";
+  const pnlColor = p.unreal >= 0 ? "🟢" : "🔴";
+  
+  if (mode === "telegram") {
+    const lines: string[] = [
+      `<b>💰 DEPOSIT (USDT)</b>`,
+      ``,
+      `<b>📊 Futures</b>`,
+      `   Total:    <code>${fmtNum(p.total).padStart(12)}</code>`,
+      `   Free:     <code>${fmtNum(p.free).padStart(12)}</code>`,
+      `   Used:     <code>${fmtNum(p.used).padStart(12)}</code>`,
+      `   PnL:      <code>${(pnlSign + fmtNum(p.unreal)).padStart(12)}</code> ${pnlColor}`,
+    ];
+    
+    if (typeof p.exposureUsd === "number" && p.exposureUsd > 0) {
+      const levStr = typeof p.leverage === "number" && p.leverage > 0 ? ` (${p.leverage.toFixed(2)}x)` : "";
+      lines.push(`   Exposure: <code>${fmtNum(p.exposureUsd).padStart(12)}</code>${levStr}`);
+    }
+    
+    if (typeof p.spotTotal === "number") {
+      lines.push(``);
+      lines.push(`<b>💎 Spot</b>`);
+      lines.push(`   Total:    <code>${fmtNum(p.spotTotal).padStart(12)}</code>`);
+      lines.push(`   Free:     <code>${fmtNum(p.spotFree ?? 0).padStart(12)}</code>`);
+      lines.push(`   Used:     <code>${fmtNum(p.spotUsed ?? 0).padStart(12)}</code>`);
+    }
+    
+    if (typeof p.grandTotal === "number") {
+      lines.push(``);
+      lines.push(`<b>📈 Aggregate</b>`);
+      lines.push(`   Total:    <code>${fmtNum(p.grandTotal).padStart(12)}</code>`);
+    }
+    
+    return lines.join("\n");
   }
+  
+  // Console mode - табличный формат
+  const lines: string[] = [];
+  lines.push(`┌─────────────────────────────────────┐`);
+  lines.push(`│ 📊 FUTURES                          │`);
+  lines.push(`│   Total:   ${fmtNum(p.total).padStart(14)} USDT   │`);
+  lines.push(`│   Free:    ${fmtNum(p.free).padStart(14)} USDT   │`);
+  lines.push(`│   Used:    ${fmtNum(p.used).padStart(14)} USDT   │`);
+  lines.push(`│   PnL:     ${(pnlSign + fmtNum(p.unreal)).padStart(14)} USDT   │`);
+  
+  if (typeof p.exposureUsd === "number" && p.exposureUsd > 0) {
+    const levStr = typeof p.leverage === "number" && p.leverage > 0 ? ` (${p.leverage.toFixed(2)}x)` : "";
+    lines.push(`│   Exposure:${fmtNum(p.exposureUsd).padStart(14)} USDT${levStr.padEnd(3)} │`);
+  }
+  
   if (typeof p.spotTotal === "number") {
-    lines.push(`spot:     total=${(p.spotTotal ?? 0).toFixed(2)}  free=${(p.spotFree ?? 0).toFixed(2)}  used=${(p.spotUsed ?? 0).toFixed(2)}`);
+    lines.push(`├─────────────────────────────────────┤`);
+    lines.push(`│ 💎 SPOT                             │`);
+    lines.push(`│   Total:   ${fmtNum(p.spotTotal).padStart(14)} USDT   │`);
+    lines.push(`│   Free:    ${fmtNum(p.spotFree ?? 0).padStart(14)} USDT   │`);
+    lines.push(`│   Used:    ${fmtNum(p.spotUsed ?? 0).padStart(14)} USDT   │`);
   }
+  
   if (typeof p.grandTotal === "number") {
-    lines.push(`aggregate: ${(p.grandTotal ?? 0).toFixed(2)}`);
+    lines.push(`├─────────────────────────────────────┤`);
+    lines.push(`│ 📈 AGGREGATE                        │`);
+    lines.push(`│   Total:   ${fmtNum(p.grandTotal).padStart(14)} USDT   │`);
   }
-  return mode === "console" ? lineBox(lines, "DEPOSIT (USDT)") : monoBlock(lines.join("\n"));
+  
+  lines.push(`└─────────────────────────────────────┘`);
+  return lines.join("\n");
 }
 
 // ---------- Компактная таблица позиций для Telegram ----------
@@ -285,10 +337,11 @@ export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string
 }
 
 // ------ Пресеты ------
-export function formatPreset(mode: UIMode, p: { name: string; risk: number; tp: number[]; ratio: number[]; isDefault?: boolean }) {
+export function formatPreset(mode: UIMode, p: { name: string; risk: number; riskType?: "money" | "percent"; tp: number[]; ratio: number[]; isDefault?: boolean }) {
+  const riskDisplay = p.riskType === "percent" ? `${p.risk}%` : `${p.risk.toFixed(2)}$`;
   const lines = [
     `name: ${p.name}${p.isDefault ? " (default)" : ""}`,
-    `risk: ${p.risk.toFixed(2)}$`,
+    `risk: ${riskDisplay}${p.riskType === "percent" ? " (от депозита)" : ""}`,
     `take_profit: [${p.tp.join(", ")}]`,
     `take_profit_ratio: [${p.ratio.join(", ")}]`,
   ];

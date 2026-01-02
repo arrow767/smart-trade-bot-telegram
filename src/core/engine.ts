@@ -70,6 +70,45 @@ const AUTO_CLEANUP_ERROR_TASKS_DAYS = Number(process.env.AUTO_CLEANUP_ERROR_TASK
 const TASK_CHAINING_ENABLED = String(process.env.TASK_CHAINING_ENABLED || "true").toLowerCase() === "true" 
   || String(process.env.TASK_CHAINING_ENABLED || "true") === "1";
 
+// ✅ НОВОЕ: Источник депозита для расчёта % риска
+// Варианты: "spot", "perp", "aggregate" (spot + perp)
+type DepositSource = "spot" | "perp" | "aggregate";
+const DEPOSIT_SOURCE: DepositSource = (() => {
+  const val = String(process.env.DEPOSIT_SOURCE || "aggregate").toLowerCase().trim();
+  if (val === "spot") return "spot";
+  if (val === "perp" || val === "futures") return "perp";
+  return "aggregate";
+})();
+
+/**
+ * ✅ Получить депозит для расчёта % риска
+ */
+async function getDepositForRisk(ex: BinanceFutures): Promise<number> {
+  const futures = await ex.fetchFuturesUSDTBalance();
+  const futTotal = futures.total || 0;
+  
+  if (DEPOSIT_SOURCE === "perp") return futTotal;
+  
+  let spotTotal = 0;
+  try {
+    const spot = await ex.fetchSpotUSDTBalance();
+    spotTotal = spot.total || 0;
+  } catch {}
+  
+  if (DEPOSIT_SOURCE === "spot") return spotTotal;
+  
+  // aggregate
+  return futTotal + spotTotal;
+}
+
+/**
+ * ✅ Рассчитать риск в $ из % депозита
+ */
+async function calculateRiskFromPercent(ex: BinanceFutures, percent: number): Promise<number> {
+  const deposit = await getDepositForRisk(ex);
+  return (deposit * percent) / 100;
+}
+
 /**
  * ✅ КРИТИЧНО: Снять ВСЕ ордера по символу (entry, SL, TP, лимитки, стопы)
  * Вызывается при отмене задачи для гарантии чистого состояния
@@ -610,6 +649,7 @@ export async function runCommand(
       formatPreset(mode, {
         name: `${p.config_name}${tag}`,
         risk: p.trade_risk,
+        riskType: p.risk_type,
         tp: p.take_profit,
         ratio: p.take_profit_ratio,
         isDefault: isL || isS,
@@ -623,6 +663,7 @@ export async function runCommand(
     const next: TradingPreset = {
       config_name: parsed.name,
       trade_risk: parsed.risk ?? current.trade_risk ?? 100,
+      risk_type: parsed.riskType ?? current.risk_type ?? "money", // ✅ НОВОЕ
       take_profit: parsed.tp ?? current.take_profit ?? [3, 5, 7],
       take_profit_ratio: parsed.ratio ?? current.take_profit_ratio ?? [35, 30, 35],
     };
@@ -654,6 +695,7 @@ export async function runCommand(
       formatPreset(mode, {
         name: `${next.config_name}${tag}`,
         risk: next.trade_risk,
+        riskType: next.risk_type,
         tp: next.take_profit,
         ratio: next.take_profit_ratio,
         isDefault: isL || isS,
@@ -961,7 +1003,14 @@ export async function runCommand(
   // --- торговля ---
   if (parsed.kind !== "trade") return;
 
-  const { dir, rawTicker, legs, presetName, dryRun, market, riskUsdOverride, noPreset } = parsed as any;
+  const { dir, rawTicker, legs, presetName, dryRun, market, riskUsdOverride, riskPercentOverride, noPreset } = parsed as any;
+  
+  // ✅ НОВОЕ: Расчёт риска из % депозита если указан riskPercentOverride
+  let calculatedRiskUsd: number | undefined = riskUsdOverride;
+  if (typeof riskPercentOverride === "number" && riskPercentOverride > 0) {
+    calculatedRiskUsd = await calculateRiskFromPercent(ex, riskPercentOverride);
+    console.log(`[RISK] ${riskPercentOverride}% от депозита (${DEPOSIT_SOURCE}) = $${calculatedRiskUsd.toFixed(2)}`);
+  }
   const side = dir === "l" ? "long" : "short";
   const sideEntry = side === "long" ? "buy" : "sell";
   const sideExit = side === "long" ? "sell" : "buy";
@@ -971,6 +1020,12 @@ export async function runCommand(
     (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : presetName;
   const preset = await getPreset(presetNameEffective);
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
+  
+  // ✅ НОВОЕ: Если нет override и пресет использует % от депозита — рассчитываем
+  if (!calculatedRiskUsd && preset.risk_type === "percent") {
+    calculatedRiskUsd = await calculateRiskFromPercent(ex, preset.trade_risk);
+    console.log(`[RISK] Пресет "${presetNameEffective}": ${preset.trade_risk}% от депозита (${DEPOSIT_SOURCE}) = $${calculatedRiskUsd.toFixed(2)}`);
+  }
   
   // ✅ Пытаемся загрузить market (с автоперезагрузкой если не найден), но не прерываем работу
   try {
@@ -998,7 +1053,7 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: riskUsdOverride, noPreset });
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset });
     book.setEntryOrders(task, [] as string[]);
 
     book.set(task, "waiting_fill");
@@ -1091,7 +1146,7 @@ export async function runCommand(
             const baseRisk =
               (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
                 ? task.riskUsd
-                : (Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk);
+                : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : preset.trade_risk);
             const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
             const effectiveRiskUsd = baseRisk * factor;
 
@@ -1242,7 +1297,7 @@ export async function runCommand(
   const first = legs[0];
 
   const firstPick = computeQtyForUsdSmart(ex, symbolCcxt, first.usd, first.price);
-  const baseRiskPreview = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : preset.trade_risk;
+  const baseRiskPreview = Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : preset.trade_risk;
   const planningPresetPreview = { ...preset, trade_risk: baseRiskPreview } as any;
   const firstPlan = planTargets({ side, entryPrice: first.price, positionUsd: first.usd, preset: planningPresetPreview });
 
@@ -1342,7 +1397,7 @@ export async function runCommand(
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName: presetNameEffective, riskUsd: riskUsdOverride, noPreset }
+    { side, totalUsd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset }
   );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);
@@ -1792,7 +1847,7 @@ export async function runCommand(
           const baseRisk =
             (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
               ? task.riskUsd
-              : (Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk);
+              : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
           const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
           const effectiveRiskUsd = baseRisk * factor;
 
@@ -2056,7 +2111,7 @@ export async function runCommand(
             const filters = ex.getSymbolFilters(symbolCcxt);
             const totalPlannedUsd = task.totalUsd ?? posSize * entryAvg;
             const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
-            const baseRisk = Number.isFinite(riskUsdOverride) && (riskUsdOverride as number) > 0 ? (riskUsdOverride as number) : presetForRisk.trade_risk;
+            const baseRisk = Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk;
             const planningPreset = { ...presetForRisk, trade_risk: baseRisk } as any;
             const re = planTargets({ side, entryPrice: entryAvg, positionUsd: posSize * entryAvg, preset: planningPreset });
             let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);

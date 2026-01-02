@@ -70,14 +70,27 @@ export function parseLine(line: string): ParsedCmd | null {
     return { kind: "risk_calc", ticker, risk, coef: finalCoef };
   }
 
-  // Поддержка ручного риска в начале: "50 l xrp ..." или "50$ l ..."
+  // Поддержка ручного риска в начале: "50 l xrp ...", "50$ l ...", или "1% l xrp ..."
   let riskOverride: number | undefined;
+  let riskPercentOverride: number | undefined; // ✅ НОВОЕ: риск в % от депозита
   let idx = 0;
   const first = p[0];
-  const mRisk = first && /^\d+(?:[.,]\d+)?\$?$/.test(first) ? parseNumberToken(first.replace(/\$/g, "")) : NaN;
-  if (Number.isFinite(mRisk)) {
-    riskOverride = Number(mRisk);
-    idx = 1;
+  
+  // Проверяем на % риск (1%, 0.5%, 2,5%)
+  const percentMatch = first?.match(/^(\d+(?:[.,]\d+)?)\s*%$/);
+  if (percentMatch) {
+    const pctValue = parseNumberToken(percentMatch[1]);
+    if (Number.isFinite(pctValue) && pctValue > 0) {
+      riskPercentOverride = pctValue;
+      idx = 1;
+    }
+  } else {
+    // Проверяем на $ риск (50, 50$)
+    const mRisk = first && /^\d+(?:[.,]\d+)?\$?$/.test(first) ? parseNumberToken(first.replace(/\$/g, "")) : NaN;
+    if (Number.isFinite(mRisk)) {
+      riskOverride = Number(mRisk);
+      idx = 1;
+    }
   }
 
   const cmd = (p[idx] || "").toLowerCase();
@@ -112,6 +125,9 @@ export function parseLine(line: string): ParsedCmd | null {
         if (m) kv.set(m[1].toLowerCase(), m[2]);
       }
       const risk = kv.has("risk") ? Number(kv.get("risk")) : undefined;
+      // ✅ НОВОЕ: risk_type=money|percent
+      const riskTypeRaw = kv.get("risk_type") || kv.get("risktype") || kv.get("type");
+      const riskType = riskTypeRaw === "percent" || riskTypeRaw === "%" ? "percent" : (riskTypeRaw === "money" || riskTypeRaw === "$" ? "money" : undefined);
       const tp = parseNumsCSV(kv.get("tp") || kv.get("take_profit"));
       const ratio = parseNumsCSV(kv.get("ratio") || kv.get("take_profit_ratio"));
       const makeDefault = kv.get("default") === "1" || kv.get("default") === "true";
@@ -121,7 +137,7 @@ export function parseLine(line: string): ParsedCmd | null {
       const makeDefaultShort =
         kv.get("default_short") === "1" || kv.get("default_short") === "true" ||
         kv.get("default_s") === "1" || kv.get("default_s") === "true";
-      return { kind: "preset_set", name, risk, tp, ratio, makeDefault, makeDefaultLong, makeDefaultShort };
+      return { kind: "preset_set", name, risk, riskType, tp, ratio, makeDefault, makeDefaultLong, makeDefaultShort };
     }
 
     if (sub.startsWith("default")) {
@@ -247,7 +263,8 @@ export function parseLine(line: string): ParsedCmd | null {
       presetAuto,
       dryRun: false,
       riskUsdOverride: riskOverride,
-      noPreset, // ✅ НОВОЕ
+      riskPercentOverride, // ✅ НОВОЕ: риск в % от депозита
+      noPreset,
     };
   }
 
@@ -281,5 +298,5 @@ export function parseLine(line: string): ParsedCmd | null {
     presetAuto = false;
   }
 
-  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, presetAuto, dryRun, market: null, riskUsdOverride: riskOverride, noPreset };
+  return { kind: "trade", dir: cmd as "l" | "s", rawTicker, legs, presetName, presetAuto, dryRun, market: null, riskUsdOverride: riskOverride, riskPercentOverride, noPreset };
 }
