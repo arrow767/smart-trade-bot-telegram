@@ -415,8 +415,11 @@ export async function runCommand(
         // Обычные ордера
         const open = (await ex.fetchOpenOrders(parsed.symbol)) as any[];
         for (const o of open) {
-          // Получаем реальный тип ордера от биржи
-          const orderType = String(o.type || o.info?.type || "UNKNOWN").toUpperCase();
+          // Получаем реальный тип ордера: сначала raw от Binance (info.type), потом CCXT (o.type)
+          // CCXT может возвращать в разных полях: info.type (raw Binance), type (normalized), info.origType
+          const rawType = o.info?.type || o.info?.origType || "";
+          const ccxtType = o.type || "";
+          const orderType = (rawType || ccxtType || "UNKNOWN").toString().toUpperCase();
           rows.push({
             id: String(o.id || o.info?.orderId || ""),
             symbol: parsed.symbol,
@@ -452,8 +455,8 @@ export async function runCommand(
             }
           } catch {}
           
-          // Реальный тип ордера от биржи
-          const orderType = String(o.type || "UNKNOWN").toUpperCase();
+          // Реальный тип ордера от биржи (Binance возвращает type или origType)
+          const orderType = String(o.type || o.origType || "UNKNOWN").toUpperCase();
           
           rows.push({
             id: String(o.orderId || ""),
@@ -762,11 +765,43 @@ export async function runCommand(
 
   if (parsed.kind === "tasks") {
     const allTasks = book.list();
+    
+    // ✅ Собираем символы задач, у которых нет сохранённых цен
+    const tasksNeedingPrices = allTasks.filter(t => 
+      (!t.entryPrices || t.entryPrices.length === 0) && 
+      t.entryOrderIds && t.entryOrderIds.length > 0
+    );
+    
+    // Загружаем цены из открытых ордеров
+    const pricesMap = new Map<number, number[]>();
+    const symbolsToFetch = [...new Set(tasksNeedingPrices.map(t => t.symbolCcxt))];
+    
+    for (const sym of symbolsToFetch) {
+      try {
+        const open = (await ex.fetchOpenOrders(sym)) as any[];
+        const tasksForSym = tasksNeedingPrices.filter(t => t.symbolCcxt === sym);
+        for (const task of tasksForSym) {
+          const entryIdSet = new Set((task.entryOrderIds || []).map(String));
+          const prices: number[] = [];
+          for (const o of open) {
+            const orderId = String(o.id || o.info?.orderId || "");
+            if (entryIdSet.has(orderId)) {
+              const price = Number(o.price ?? o.info?.price ?? 0);
+              const stopPrice = Number(o.stopPrice ?? o.info?.stopPrice ?? 0);
+              const p = price > 0 ? price : stopPrice;
+              if (p > 0) prices.push(p);
+            }
+          }
+          if (prices.length > 0) pricesMap.set(task.id, prices);
+        }
+      } catch {}
+    }
+    
     const rows = allTasks.map((t) => ({
       id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
       created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
-      entryPrices: t.entryPrices, // ✅ НОВОЕ: цены входов
+      entryPrices: t.entryPrices || pricesMap.get(t.id), // цены из task или из ордеров
     }));
     info(formatTasks(mode, rows));
     return;
