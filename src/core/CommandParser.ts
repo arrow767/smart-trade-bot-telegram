@@ -246,6 +246,30 @@ export function parseLine(line: string): ParsedCmd | null {
   const rawTicker = p[idx+1];
   if (!rawTicker) return null;
 
+  // MARKET-вход с авто-объёмом: l <sym> a [preset|-]
+  const marketAutoToken = p[idx+2]?.toLowerCase();
+  const marketAutoMatch = marketAutoToken?.match(/^(a|auto)(?:-(\d+(?:[.,]\d+)?))?$/);
+  if (marketAutoMatch) {
+    // Маркет с авто-объёмом
+    const autoCoef = marketAutoMatch[2] ? parseNumberToken(marketAutoMatch[2]) : undefined;
+    const presetArg = p[idx+3] || DEFAULT_PRESET;
+    const noPreset = presetArg === "-" || presetArg === "—";
+    const presetName = noPreset ? DEFAULT_PRESET : presetArg;
+    return {
+      kind: "trade",
+      dir: cmd as "l" | "s",
+      rawTicker,
+      legs: [],
+      market: { usd: 0, auto: true, autoCoef: Number.isFinite(autoCoef) && autoCoef! > 0 ? autoCoef : undefined },
+      presetName,
+      presetAuto: !p[idx+3],
+      dryRun: false,
+      riskUsdOverride: riskOverride,
+      riskPercentOverride,
+      noPreset,
+    };
+  }
+
   // MARKET-вход краткий: l <sym> <usd> [preset|-]
   if (p.length >= idx+3 && Number.isFinite(parseHumanUsd(p[idx+2])) && (p.length === idx+3 || Number.isNaN(parseNumberToken(p[idx+3])))) {
     const usd = parseHumanUsd(p[idx+2]);

@@ -1253,6 +1253,31 @@ export async function runCommand(
   let markPrice = Number(t0.last ?? t0.mark ?? t0.info?.markPrice);
   if (!markPrice || !(markPrice > 0)) throw new Error(`Не удалось получить текущую цену для ${symbolCcxt}`);
 
+  // ===== АВТО-ОБЪЁМ ДЛЯ МАРКЕТА =====
+  if (market && (market as any).auto && market.usd === 0) {
+    const riskForCalc = calculatedRiskUsd ?? preset.trade_risk;
+    if (!riskForCalc || riskForCalc <= 0) {
+      info(`❌ Для авто-объёма нужен риск. Укажите риск в команде или пресете.`);
+      return;
+    }
+    
+    try {
+      const { getAutoVolume } = await import("./NatrCalculator");
+      const { volumeUsd, info: autoInfo } = await getAutoVolume(ex, rawTicker, riskForCalc, (market as any).autoCoef);
+      
+      if (volumeUsd <= 0) {
+        info(`❌ Не удалось рассчитать авто-объём для ${rawTicker}`);
+        return;
+      }
+      
+      market.usd = volumeUsd;
+      info(`📊 ${autoInfo}`);
+    } catch (err: any) {
+      info(`❌ Ошибка расчёта авто-объёма: ${err?.message || err}`);
+      return;
+    }
+  }
+
   if (market && market.usd > 0) {
     // ===== МГНОВЕННЫЙ ВХОД ПО РЫНКУ =====
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, market.usd, markPrice);

@@ -1105,12 +1105,27 @@ bot.on("text", async (ctx)=>{
         let legs: Array<{ usd: number; price: number; type: "LIMIT"|"STOP"|"MARKET" }> = [];
         let currentPrice = 0;
         
-        if (parsed.market && parsed.market.usd > 0) {
-          legs = [{ usd: parsed.market.usd, price: 0, type: "MARKET" }];
+        if (parsed.market) {
           try {
             const ticker = await ex.fetchTicker(symbolCcxt);
             currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
           } catch {}
+          
+          // ✅ Авто-объём для маркета
+          if ((parsed.market as any).auto && parsed.market.usd === 0) {
+            try {
+              const { getAutoVolume } = await import("../core/NatrCalculator");
+              const { volumeUsd, info: autoInfo } = await getAutoVolume(ex, parsed.rawTicker, riskUsd, (parsed.market as any).autoCoef);
+              if (volumeUsd > 0) {
+                parsed.market.usd = volumeUsd;
+                console.log(`[AUTO-VOLUME MARKET] ${autoInfo}`);
+              }
+            } catch (err: any) {
+              console.error(`[AUTO-VOLUME MARKET ERROR] ${err?.message || err}`);
+            }
+          }
+          
+          legs = [{ usd: parsed.market.usd, price: 0, type: "MARKET" }];
         } else {
           // Получаем текущую цену для определения типа ордера
           const ticker = await ex.fetchTicker(symbolCcxt);
