@@ -1117,6 +1117,23 @@ bot.on("text", async (ctx)=>{
           currentPrice = Number(ticker.last ?? ticker.mark ?? ticker.info?.markPrice) || 0;
           
           const isLong = parsed.dir === "l";
+          
+          // ✅ Рассчитываем авто-объём для legs с auto: true
+          for (const leg of parsed.legs) {
+            if (leg.auto && leg.usd === 0) {
+              try {
+                const { getAutoVolume } = await import("../core/NatrCalculator");
+                const { volumeUsd, info: autoInfo } = await getAutoVolume(ex, parsed.rawTicker, riskUsd, leg.autoCoef);
+                if (volumeUsd > 0) {
+                  leg.usd = volumeUsd;
+                  console.log(`[AUTO-VOLUME] ${autoInfo}`);
+                }
+              } catch (err: any) {
+                console.error(`[AUTO-VOLUME ERROR] ${err?.message || err}`);
+              }
+            }
+          }
+          
           legs = parsed.legs.map((leg: any) => {
             // LIMIT если цена лучше текущей (для long - ниже, для short - выше)
             // STOP если цена хуже текущей (для long - выше, для short - ниже)
