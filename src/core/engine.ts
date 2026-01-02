@@ -780,11 +780,16 @@ export async function runCommand(
         const open = (await ex.fetchOpenOrders(sym)) as any[];
         const tasksForSym = allTasks.filter(t => t.symbolCcxt === sym);
         
+        // Algo Orders (для entry STOP и SL/TP)
+        const algoOrders = await ex.fetchOpenAlgoOrders(sym);
+        
         for (const task of tasksForSym) {
-          // Entry prices
+          // Entry prices - проверяем и обычные ордера, и Algo Orders
           if (!task.entryPrices || task.entryPrices.length === 0) {
             const entryIdSet = new Set((task.entryOrderIds || []).map(String));
             const prices: number[] = [];
+            
+            // Обычные ордера (LIMIT)
             for (const o of open) {
               const orderId = String(o.id || o.info?.orderId || "");
               if (entryIdSet.has(orderId)) {
@@ -794,12 +799,23 @@ export async function runCommand(
                 if (p > 0) prices.push(p);
               }
             }
+            
+            // Algo Orders (STOP entry) - ID начинается с 3000000...
+            for (const ao of algoOrders) {
+              const algoId = String(ao.algoId || ao.clientAlgoId || "");
+              if (entryIdSet.has(algoId)) {
+                const triggerPrice = Number(ao.triggerPrice || ao.stopPrice || 0);
+                const price = Number(ao.price || 0);
+                const p = triggerPrice > 0 ? triggerPrice : price;
+                if (p > 0) prices.push(p);
+              }
+            }
+            
             if (prices.length > 0) entryPricesMap.set(task.id, prices);
           }
         }
         
-        // Algo Orders (SL/TP) - STOP_MARKET, TAKE_PROFIT_MARKET
-        const algoOrders = await ex.fetchOpenAlgoOrders(sym);
+        // SL/TP из Algo Orders
         for (const ao of algoOrders) {
           const orderType = String(ao.orderType || ao.type || "").toUpperCase();
           const triggerPrice = Number(ao.triggerPrice || ao.stopPrice || 0);
@@ -951,25 +967,44 @@ export async function runCommand(
     let plannedQty = 0;
     try {
       if (t.entryOrderIds && t.entryOrderIds.length) {
-        const open = (await ex.fetchOpenOrders(t.symbolCcxt)) as any[];
-        // ✅ Создаём Set для быстрого поиска (и String для сравнения)
         const entryIdSet = new Set(t.entryOrderIds.map(String));
         
+        // Обычные ордера (LIMIT)
+        const open = (await ex.fetchOpenOrders(t.symbolCcxt)) as any[];
         for (const o of open) {
-          // ✅ Проверяем по нескольким полям ID
           const orderId = String(o.id || o.info?.orderId || "");
           if (!orderId || !entryIdSet.has(orderId)) continue;
           
           const qty = Number(o.amount ?? o.info?.origQty ?? 0) || undefined;
           plannedQty += qty || 0;
           
-          // ✅ Берём цену из всех возможных полей
           const price = Number(o.price ?? o.info?.price ?? 0) || undefined;
           const stopPrice = Number(o.stopPrice ?? o.info?.stopPrice ?? 0) || undefined;
           
           entryDetails.push({
             id: orderId,
-            type: String(o.type || o.info?.type || "LIMIT"),
+            type: String(o.info?.type || o.type || "LIMIT").toUpperCase(),
+            price,
+            stopPrice,
+            qty,
+          });
+        }
+        
+        // Algo Orders (STOP entry) - ID начинается с 3000000...
+        const algoOrders = await ex.fetchOpenAlgoOrders(t.symbolCcxt);
+        for (const ao of algoOrders) {
+          const algoId = String(ao.algoId || ao.clientAlgoId || "");
+          if (!algoId || !entryIdSet.has(algoId)) continue;
+          
+          const qty = Number(ao.quantity || ao.origQty || 0) || undefined;
+          plannedQty += qty || 0;
+          
+          const price = Number(ao.price || 0) || undefined;
+          const stopPrice = Number(ao.triggerPrice || ao.stopPrice || 0) || undefined;
+          
+          entryDetails.push({
+            id: algoId,
+            type: String(ao.orderType || ao.type || "STOP").toUpperCase(),
             price,
             stopPrice,
             qty,
