@@ -1499,6 +1499,35 @@ export async function runCommand(
     return;
   }
 
+  // ======= АВТО-ОБЪЁМ ЧЕРЕЗ NATR =======
+  // Если есть legs с auto: true - рассчитываем объём через NATR калькулятор
+  for (const leg of legs) {
+    if (leg.auto && leg.usd === 0) {
+      // Определяем риск для калькулятора
+      const riskForCalc = calculatedRiskUsd ?? preset.trade_risk;
+      if (!riskForCalc || riskForCalc <= 0) {
+        info(`❌ Для авто-объёма нужен риск. Укажите риск в команде или пресете.`);
+        return;
+      }
+      
+      try {
+        const { getAutoVolume } = await import("./NatrCalculator");
+        const { volumeUsd, info: autoInfo } = await getAutoVolume(ex, rawTicker, riskForCalc, leg.autoCoef);
+        
+        if (volumeUsd <= 0) {
+          info(`❌ Не удалось рассчитать авто-объём для ${rawTicker}`);
+          return;
+        }
+        
+        leg.usd = volumeUsd;
+        info(`📊 ${autoInfo}`);
+      } catch (err: any) {
+        info(`❌ Ошибка расчёта авто-объёма: ${err?.message || err}`);
+        return;
+      }
+    }
+  }
+
   // ======= LIMIT/STOP МНОГОНОЖЕВАЯ ЛОГИКА =======
   const totalUsd = legs.reduce((a: number, l: TradeLeg) => a + l.usd, 0);
   const first = legs[0];

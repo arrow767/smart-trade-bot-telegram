@@ -270,12 +270,35 @@ export function parseLine(line: string): ParsedCmd | null {
 
   const legs: TradeLeg[] = [];
   let i = idx+2;
-  while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && Number.isFinite(parseNumberToken(p[i + 1]))) {
-    const usd = parseHumanUsd(p[i]);
+  
+  // Проверяем auto-режим: a, auto, a-0.85, auto-0.85
+  const autoToken = p[i]?.toLowerCase();
+  const autoMatch = autoToken?.match(/^(a|auto)(?:-(\d+(?:[.,]\d+)?))?$/);
+  
+  if (autoMatch && p[i + 1]) {
+    // Auto mode: a <price> или a-0.85 <price>
+    const autoCoef = autoMatch[2] ? parseNumberToken(autoMatch[2]) : undefined;
     const price = parseNumberToken(p[i + 1]);
-    if (usd > 0 && price > 0) legs.push({ usd, price });
-    i += 2;
+    if (price > 0) {
+      // usd будет расчитан позже через NATR, пока ставим 0
+      legs.push({ 
+        usd: 0, 
+        price, 
+        auto: true, 
+        autoCoef: Number.isFinite(autoCoef) && autoCoef! > 0 ? autoCoef : undefined 
+      });
+      i += 2;
+    }
+  } else {
+    // Обычный режим: <usd> <price> pairs
+    while (i + 1 < p.length && Number.isFinite(parseHumanUsd(p[i])) && Number.isFinite(parseNumberToken(p[i + 1]))) {
+      const usd = parseHumanUsd(p[i]);
+      const price = parseNumberToken(p[i + 1]);
+      if (usd > 0 && price > 0) legs.push({ usd, price });
+      i += 2;
+    }
   }
+  
   if (legs.length === 0) return null;
 
   let presetName = DEFAULT_PRESET;

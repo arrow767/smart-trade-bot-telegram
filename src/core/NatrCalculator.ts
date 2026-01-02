@@ -348,3 +348,71 @@ NATR×coef: ${fmt(r.natrCoef300)}%
 📦 Volume: <code>${fmtNum(r.volume300)}</code>`;
 }
 
+// ============ АВТО-ОБЪЁМ ДЛЯ TRADE ============
+
+export type AutoVolumeMode = "min" | "max" | "avg" | "100" | "300";
+
+/**
+ * Получить авто-объём на основе NATR калькулятора
+ * @param ex - exchange instance
+ * @param ticker - тикер инструмента
+ * @param riskUsd - риск в USD
+ * @param coef - коэффициент (опционально, если не указан - берётся из env)
+ * @returns объём в USD (округлённый до целых)
+ */
+export async function getAutoVolume(
+  ex: BinanceFutures,
+  ticker: string,
+  riskUsd: number,
+  coef?: number
+): Promise<{ volumeUsd: number; info: string }> {
+  // Режим выбора объёма из env
+  const modeEnv = (process.env.NATR_AUTO_VOLUME || "min").toLowerCase() as AutoVolumeMode;
+  
+  // Конфиг с опциональным кастомным коэф
+  const config: NatrConfig = {
+    ...DEFAULT_NATR_CONFIG,
+    coef: coef ?? DEFAULT_NATR_CONFIG.coef,
+  };
+  
+  // Рассчитываем
+  const result = await calculateRisk(ex, ticker, riskUsd, config);
+  
+  // Выбираем объём по режиму
+  let volumeUsd: number;
+  let periodInfo: string;
+  
+  switch (modeEnv) {
+    case "min":
+      volumeUsd = Math.min(result.volume100, result.volume300);
+      periodInfo = result.volume100 < result.volume300 ? "L100" : "L300";
+      break;
+    case "max":
+      volumeUsd = Math.max(result.volume100, result.volume300);
+      periodInfo = result.volume100 > result.volume300 ? "L100" : "L300";
+      break;
+    case "avg":
+      volumeUsd = (result.volume100 + result.volume300) / 2;
+      periodInfo = "AVG";
+      break;
+    case "100":
+      volumeUsd = result.volume100;
+      periodInfo = "L100";
+      break;
+    case "300":
+      volumeUsd = result.volume300;
+      periodInfo = "L300";
+      break;
+    default:
+      volumeUsd = Math.min(result.volume100, result.volume300);
+      periodInfo = "min";
+  }
+  
+  // Округляем до целых долларов
+  volumeUsd = Math.round(volumeUsd);
+  
+  const info = `NATR auto: $${volumeUsd} (${periodInfo}, coef=${config.coef})`;
+  
+  return { volumeUsd, info };
+}
+

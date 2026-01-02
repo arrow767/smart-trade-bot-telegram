@@ -1,6 +1,11 @@
 // Типы команд/задач
 
-export type TradeLeg = { usd: number; price: number };
+export type TradeLeg = { 
+  usd: number; 
+  price: number;
+  auto?: boolean;      // авто-расчёт объёма через NATR
+  autoCoef?: number;   // кастомный коэффициент для авто-расчёта
+};
 
 export type ParsedCmd =
   | {
