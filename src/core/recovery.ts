@@ -247,9 +247,11 @@ async function ensureBracketsForTask(
     }
     
     const positionUsd = currentPosSize * entryAvg;
-    const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset });
+    // ✅ КРИТИЧНО: Используем риск из задачи, а не из текущего пресета
+    const planningPreset = { ...preset, trade_risk: effectiveRiskUsd } as any;
+    const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
     
-    console.log(`[DEBUG] Recovery TP: ${symbol} pos=${fmtQty5(currentPosSize)}, entryAvg=${entryAvg}, tpPrices=${re.tpPrices.length}`);
+    console.log(`[DEBUG] Recovery TP: ${symbol} pos=${fmtQty5(currentPosSize)}, entryAvg=${entryAvg}, risk=$${effectiveRiskUsd.toFixed(2)}, tpPrices=${re.tpPrices.length}`);
     
     let tpQtys = splitQtyToStep(currentPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);

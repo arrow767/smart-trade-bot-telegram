@@ -243,9 +243,10 @@ async function handleTaskChaining(
       log(`🔗 Цепочка: новый SL @ ${safeSL} (от ${newTaskEntryAvg}, risk=$${baseRisk}, qty=${fmtQty5(newTaskEntryQty)})`);
     }
     
-    // ✅ КЛЮЧЕВОЕ: TP рассчитываем на ВЕСЬ объём позиции
+    // ✅ КЛЮЧЕВОЕ: TP рассчитываем на ВЕСЬ объём позиции с риском из задачи
     const positionUsd = totalPositionQty * newTaskEntryAvg;
-    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd, preset });
+    const planningPreset = { ...preset, trade_risk: baseRisk } as any;
+    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd, preset: planningPreset });
     
     let tpQtys = splitQtyToStep(totalPositionQty, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
@@ -1232,6 +1233,13 @@ export async function runCommand(
   if (!calculatedRiskUsd && preset.risk_type === "percent") {
     calculatedRiskUsd = await calculateRiskFromPercent(ex, preset.trade_risk);
     console.log(`[RISK] Пресет "${presetNameEffective}": ${preset.trade_risk}% от депозита (${DEPOSIT_SOURCE}) = $${calculatedRiskUsd.toFixed(2)}`);
+  }
+  
+  // ✅ КРИТИЧНО: Если риск всё ещё не установлен - берём из пресета (для типа "money")
+  // Это гарантирует что task.riskUsd ВСЕГДА будет сохранён
+  if (!calculatedRiskUsd && preset.trade_risk > 0) {
+    calculatedRiskUsd = preset.trade_risk;
+    console.log(`[RISK] Пресет "${presetNameEffective}": $${calculatedRiskUsd} (money)`);
   }
   
   // ✅ Пытаемся загрузить market (с автоперезагрузкой если не найден), но не прерываем работу
