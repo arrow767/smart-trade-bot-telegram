@@ -128,41 +128,47 @@ export function formatDeposit(
     exposureUsd?: number; leverage?: number;
   }
 ) {
+  // Форматирование с разделителями тысяч
   const fmtNum = (n: number) => n.toLocaleString("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const pnlSign = p.unreal >= 0 ? "+" : "";
-  const pnlColor = p.unreal >= 0 ? "🟢" : "🔴";
+  const pnlEmoji = p.unreal >= 0 ? "🟢" : "🔴";
   
   if (mode === "telegram") {
-    const lines: string[] = [
-      `<b>💰 DEPOSIT (USDT)</b>`,
-      ``,
-      `<b>📊 Futures</b>`,
-      `   Total:    <code>${fmtNum(p.total).padStart(12)}</code>`,
-      `   Free:     <code>${fmtNum(p.free).padStart(12)}</code>`,
-      `   Used:     <code>${fmtNum(p.used).padStart(12)}</code>`,
-      `   PnL:      <code>${(pnlSign + fmtNum(p.unreal)).padStart(12)}</code> ${pnlColor}`,
-    ];
+    // Красивая таблица для Telegram
+    const W = 11; // ширина колонки значений
+    const pad = (s: string) => s.padStart(W);
+    
+    let msg = `<b>💰 DEPOSIT (USDT)</b>\n\n`;
+    
+    // Futures секция
+    msg += `<b>📊 Futures</b>\n`;
+    msg += `<code>`;
+    msg += `Total:    ${pad(fmtNum(p.total))}\n`;
+    msg += `Free:     ${pad(fmtNum(p.free))}\n`;
+    msg += `Used:     ${pad(fmtNum(p.used))}\n`;
+    msg += `PnL:      ${pad(pnlSign + fmtNum(p.unreal))}</code> ${pnlEmoji}\n`;
     
     if (typeof p.exposureUsd === "number" && p.exposureUsd > 0) {
       const levStr = typeof p.leverage === "number" && p.leverage > 0 ? ` (${p.leverage.toFixed(2)}x)` : "";
-      lines.push(`   Exposure: <code>${fmtNum(p.exposureUsd).padStart(12)}</code>${levStr}`);
+      msg += `<code>Exposure: ${pad(fmtNum(p.exposureUsd))}</code>${levStr}\n`;
     }
     
+    // Spot секция
     if (typeof p.spotTotal === "number") {
-      lines.push(``);
-      lines.push(`<b>💎 Spot</b>`);
-      lines.push(`   Total:    <code>${fmtNum(p.spotTotal).padStart(12)}</code>`);
-      lines.push(`   Free:     <code>${fmtNum(p.spotFree ?? 0).padStart(12)}</code>`);
-      lines.push(`   Used:     <code>${fmtNum(p.spotUsed ?? 0).padStart(12)}</code>`);
+      msg += `\n<b>💎 Spot</b>\n`;
+      msg += `<code>`;
+      msg += `Total:    ${pad(fmtNum(p.spotTotal))}\n`;
+      msg += `Free:     ${pad(fmtNum(p.spotFree ?? 0))}\n`;
+      msg += `Used:     ${pad(fmtNum(p.spotUsed ?? 0))}</code>\n`;
     }
     
+    // Aggregate секция
     if (typeof p.grandTotal === "number") {
-      lines.push(``);
-      lines.push(`<b>📈 Aggregate</b>`);
-      lines.push(`   Total:    <code>${fmtNum(p.grandTotal).padStart(12)}</code>`);
+      msg += `\n<b>📈 Aggregate</b>\n`;
+      msg += `<code>Total:    ${pad(fmtNum(p.grandTotal))}</code>\n`;
     }
     
-    return lines.join("\n");
+    return msg.trim();
   }
   
   // Console mode - табличный формат

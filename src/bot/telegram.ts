@@ -992,7 +992,38 @@ bot.on("text", async (ctx)=>{
         const side = parsed.dir === "l" ? "long" : "short";
         const presetNameEffective = (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : parsed.presetName;
         const preset = await getPreset(presetNameEffective);
-        const riskUsd = Number.isFinite(parsed.riskUsdOverride) && (parsed.riskUsdOverride as number) > 0 ? (parsed.riskUsdOverride as number) : preset.trade_risk;
+        
+        // ✅ НОВОЕ: Рассчитываем риск из % депозита если указан riskPercentOverride
+        let riskUsd: number;
+        if (typeof parsed.riskPercentOverride === "number" && parsed.riskPercentOverride > 0) {
+          // Получаем депозит для расчёта %
+          const DEPOSIT_SOURCE = String(process.env.DEPOSIT_SOURCE || "aggregate").toLowerCase().trim();
+          const futures = await ex.fetchFuturesUSDTBalance();
+          let deposit = futures.total || 0;
+          if (DEPOSIT_SOURCE === "spot" || DEPOSIT_SOURCE === "aggregate") {
+            try {
+              const spot = await ex.fetchSpotUSDTBalance();
+              deposit = DEPOSIT_SOURCE === "spot" ? (spot.total || 0) : deposit + (spot.total || 0);
+            } catch {}
+          }
+          riskUsd = Math.round((deposit * parsed.riskPercentOverride) / 100); // округляем до целых $
+        } else if (Number.isFinite(parsed.riskUsdOverride) && (parsed.riskUsdOverride as number) > 0) {
+          riskUsd = parsed.riskUsdOverride as number;
+        } else if (preset.risk_type === "percent") {
+          // Пресет с % риском
+          const DEPOSIT_SOURCE = String(process.env.DEPOSIT_SOURCE || "aggregate").toLowerCase().trim();
+          const futures = await ex.fetchFuturesUSDTBalance();
+          let deposit = futures.total || 0;
+          if (DEPOSIT_SOURCE === "spot" || DEPOSIT_SOURCE === "aggregate") {
+            try {
+              const spot = await ex.fetchSpotUSDTBalance();
+              deposit = DEPOSIT_SOURCE === "spot" ? (spot.total || 0) : deposit + (spot.total || 0);
+            } catch {}
+          }
+          riskUsd = Math.round((deposit * preset.trade_risk) / 100);
+        } else {
+          riskUsd = preset.trade_risk;
+        }
         
         // Получаем symbolCcxt для проверки существующих задач и ордеров
         const { symbolCcxt } = await import("../core/SymbolResolver").then(m => m.normalizeTickerToUsdt(parsed.rawTicker));
