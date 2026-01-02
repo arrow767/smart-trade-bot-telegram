@@ -89,6 +89,8 @@ export class TaskBook {
           supersededBy: Number(o.supersededBy || 0) || undefined,
           // ✅ НОВОЕ: флаг отключения SL/TP
           noPreset: o.noPreset === true || o.noPreset === "true",
+          // ✅ НОВОЕ: цены входов
+          entryPrices: Array.isArray(o.entryPrices) ? o.entryPrices.map(Number).filter((n: number) => n > 0) : undefined,
         };
         this.tasks.set(t.id, t);
         // ✅ DEBUG: Логируем каждую задачу при загрузке
@@ -102,7 +104,7 @@ export class TaskBook {
   add(
     symbolCcxt: string,
     label: string,
-    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number; noPreset?: boolean }
+    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number; noPreset?: boolean; entryPrices?: number[] }
   ) {
     const t: Task = {
       id: TASK_ID_SEQ++,
@@ -116,6 +118,7 @@ export class TaskBook {
       presetName: extras?.presetName,
       riskUsd: (typeof extras?.riskUsd === "number" && Number.isFinite(extras.riskUsd) && extras.riskUsd > 0) ? extras.riskUsd : undefined,
       noPreset: extras?.noPreset || false,
+      entryPrices: extras?.entryPrices,
     };
     this.tasks.set(t.id, t);
     this.save();

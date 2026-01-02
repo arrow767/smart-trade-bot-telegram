@@ -292,17 +292,25 @@ export function formatPositions(
   return lineBox(lines, "POSITIONS");
 }
 
-export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string; symbol:string; label:string; created:string; error?:string }>) {
+export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string; symbol:string; label:string; created:string; error?:string; entryPrices?:number[] }>) {
   if (!rows.length) return mode === "console" ? lineBox(["Нет активных задач."], "TASKS") : monoBlock("Нет активных задач.");
-  // колонки: #id, status, symbol, created, label
+  // колонки: #id, status, symbol, created, label, prices
   const items = rows.map(r => ({
     id: r.id,
     status: r.status,
     symbol: shortSymbol(r.symbol).toUpperCase(),
     created: formatTime(r.created),
     label: r.label,
-    err: r.error
+    err: r.error,
+    prices: r.entryPrices,
   }));
+
+  // Форматируем цены компактно
+  const fmtPrices = (prices?: number[]) => {
+    if (!prices || prices.length === 0) return "";
+    if (prices.length === 1) return `@ ${prices[0]}`;
+    return `@ ${prices.join(", ")}`;
+  };
 
   if (mode === "telegram") {
     // Компактный стиль как в orders: группировка по символу, краткие строки
@@ -322,17 +330,21 @@ export function formatTasks(mode: UIMode, rows: Array<{ id:number; status:string
         lastSym = i.symbol;
       }
       const warn = i.err ? " ⚠️" : "";
+      const priceStr = fmtPrices(i.prices);
       out.push(
         `  #${i.id} ${i.status}${warn}`,
         `  ${i.created}`,
-        `  ${ell(i.label)}`
+        `  ${ell(i.label)}${priceStr ? `\n  ${priceStr}` : ""}`
       );
       if (i.err) out.push(`  err: ${ell(String(i.err), 80)}`);
     }
     return monoBlock(out.join("\n"));
   }
 
-  const lines = items.map(i => `#${i.id} [${i.status}] ${i.symbol}  ${i.created}  ${i.label}${i.err?`  ERR:${i.err}`:""}`);
+  const lines = items.map(i => {
+    const priceStr = fmtPrices(i.prices);
+    return `#${i.id} [${i.status}] ${i.symbol}  ${i.created}  ${i.label}${priceStr ? ` ${priceStr}` : ""}${i.err?`  ERR:${i.err}`:""}`;
+  });
   return lineBox(lines, "TASKS");
 }
 
@@ -481,9 +493,15 @@ export function formatTaskInfo(
     error?: string;
     plannedQty?: number;
     riskUsd?: number;
+    entryPrices?: number[]; // ✅ НОВОЕ: цены входов
     entryDetails?: Array<{ id: string; type: string; price?: number; stopPrice?: number; qty?: number }>
   }
 ) {
+  const fmtPrices = (prices?: number[]) => {
+    if (!prices || prices.length === 0) return "-";
+    return prices.join(", ");
+  };
+  
   const lines = [
     `id: ${p.id}`,
     `status: ${p.status}`,
@@ -496,6 +514,8 @@ export function formatTaskInfo(
     ...(typeof p.plannedQty === "number" ? [`planned_qty: ${fix3(p.plannedQty)}`] : []),
     ...(typeof p.riskUsd === "number" ? [`risk_usd: ${p.riskUsd.toFixed(2)}`] : []),
     ...(p.presetName ? [`preset: ${p.presetName}`] : []),
+    // ✅ НОВОЕ: показываем цены входов
+    ...(p.entryPrices && p.entryPrices.length > 0 ? [`entry_prices: ${fmtPrices(p.entryPrices)}`] : []),
     `entries: ${(p.entryOrderIds||[]).join(", ") || "-"}`,
     ...(p.entryDetails && p.entryDetails.length
       ? ["", "entry details:", ...p.entryDetails.map(ed => `  #${ed.id} ${ed.type}` +

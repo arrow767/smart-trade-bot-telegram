@@ -760,6 +760,7 @@ export async function runCommand(
       id: t.id, status: t.status, symbol: t.symbolCcxt, label: t.label,
       created: t.startedAt.toISOString().replace("T"," ").slice(0,19),
       error: t.error,
+      entryPrices: t.entryPrices, // ✅ НОВОЕ: цены входов
     }));
     info(formatTasks(mode, rows));
     return;
@@ -881,6 +882,7 @@ export async function runCommand(
         entryOrderIds: t.entryOrderIds, error: t.error,
         plannedQty: plannedQty || undefined,
         riskUsd,
+        entryPrices: t.entryPrices, // ✅ НОВОЕ: цены входов
         entryDetails: entryDetails.length ? entryDetails : undefined,
       })
     );
@@ -1394,10 +1396,13 @@ export async function runCommand(
     }
   }
 
+  // ✅ Собираем цены входов для отображения в tasks/info
+  const entryPrices = legs.map(l => l.price);
+  
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset }
+    { side, totalUsd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset, entryPrices }
   );
   book.setEntryOrders(task, entryIds);
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);

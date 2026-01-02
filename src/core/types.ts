@@ -102,6 +102,11 @@ export type Task = {
    * ✅ НОВОЕ: Если true — автоматические SL/TP отключены для этой задачи.
    */
   noPreset?: boolean;
+  
+  /**
+   * ✅ НОВОЕ: Цены входных ордеров (для отображения в tasks/info)
+   */
+  entryPrices?: number[];
 };
 
 export const DEFAULT_PRESET = "4h";
