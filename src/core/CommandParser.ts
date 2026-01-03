@@ -60,13 +60,11 @@ export function parseLine(line: string): ParsedCmd | null {
     // Опциональный коэффициент (поддержка точки и запятой)
     const coefStr = p[3];
     const coef = coefStr ? parseNumberToken(coefStr) : undefined;
-    console.log(`[PARSER DEBUG] r/calc: p=[${p.join(", ")}], coefStr="${coefStr}", coef=${coef}`);
     if (!Number.isFinite(risk) || risk <= 0) {
       // Если риск не указан - вернём с NaN, обработчик покажет ошибку
       return { kind: "risk_calc", ticker, risk: NaN, coef: undefined };
     }
     const finalCoef = Number.isFinite(coef) && coef! > 0 ? coef : undefined;
-    console.log(`[PARSER DEBUG] returning coef=${finalCoef}`);
     return { kind: "risk_calc", ticker, risk, coef: finalCoef };
   }
 

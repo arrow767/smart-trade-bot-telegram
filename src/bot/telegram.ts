@@ -164,16 +164,9 @@ async function safeReply(
   // ✅ Дедупликация: пропускаем если сообщение уже отправлено недавно
   const chatId = ctx?.chat?.id || ctx?.from?.id || "unknown";
   
-  // ✅ DEBUG: Логируем что пытаемся отправить
-  const preview = text.slice(0, 60).replace(/\n/g, " ");
-  console.log(`[TG] safeReply to ${chatId}: "${preview}..."`);
-  
   if (isDuplicate(chatId, text)) {
-    console.log(`[DEDUP] Skipping duplicate message to ${chatId}: ${text.slice(0, 50)}...`);
     return null;
   }
-  
-  console.log(`[TG] Sending message to ${chatId}...`);
   
   let lastError: any;
   
@@ -186,7 +179,6 @@ async function safeReply(
       
       const replyPromise = ctx.reply(text, options);
       const result = await Promise.race([replyPromise, timeoutPromise]);
-      console.log(`[TG] ✅ Message sent successfully to ${chatId}`);
       return result;
     } catch (e: any) {
       lastError = e;

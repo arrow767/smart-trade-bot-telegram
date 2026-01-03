@@ -237,8 +237,6 @@ async function ensureBracketsForTask(
     try {
       const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
       if (checkPos < minQty * 0.5) {
-        // Позиция закрыта — не ставим TP
-        console.log(`[DEBUG] Recovery TP: позиция закрыта для ${symbol}, не ставим TP`);
         return;
       }
       currentPosSize = checkPos;
@@ -251,22 +249,15 @@ async function ensureBracketsForTask(
     const planningPreset = { ...preset, trade_risk: effectiveRiskUsd } as any;
     const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
     
-    console.log(`[DEBUG] Recovery TP: ${symbol} pos=${fmtQty5(currentPosSize)}, entryAvg=${entryAvg}, risk=$${effectiveRiskUsd.toFixed(2)}, tpPrices=${re.tpPrices.length}`);
-    
     let tpQtys = splitQtyToStep(currentPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
     tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbol, q)));
-    
-    console.log(`[DEBUG] Recovery TP: tpQtys=${tpQtys.join(",")}, minQty=${filters.minQty}`);
 
     let placed = 0;
     let errors: string[] = [];
     for (let i = 0; i < re.tpPrices.length; i++) {
       const q = tpQtys[i];
-      if (!(q > 0) || q < filters.minQty) {
-        console.log(`[DEBUG] Recovery TP: skip TP${i+1} qty=${q} < minQty=${filters.minQty}`);
-        continue;
-      }
+      if (!(q > 0) || q < filters.minQty) continue;
       const p = Number(ex.priceToPrecision(symbol, re.tpPrices[i]));
       try {
         const result = await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
@@ -381,10 +372,6 @@ export function startTaskRecoveryLoop(
       //
       const waitingFillTasks = activeTasks.filter(t => t.status === "waiting_fill" && t.entryOrderIds?.length);
       
-      // ✅ DEBUG: Логируем что нашли
-      if (waitingFillTasks.length > 0) {
-        console.log(`[DEBUG] Recovery: найдено ${waitingFillTasks.length} waiting_fill задач: ${waitingFillTasks.map(t => `#${t.id}`).join(", ")}`);
-      }
       
       for (const task of waitingFillTasks) {
         try {
@@ -394,9 +381,7 @@ export function startTaskRecoveryLoop(
           const entryIds = task.entryOrderIds || [];
           if (entryIds.length === 0) continue;
           
-          console.log(`[DEBUG] Recovery #${task.id}: проверяю entry ордера [${entryIds.join(", ")}] для ${symbol}`);
-          
-          // ✅ НОВОЕ: Сначала проверяем есть ли ордера в открытых (быстрая проверка)
+          // Сначала проверяем есть ли ордера в открытых
           const openOrders = (await ex.fetchOpenOrders(symbol)) as any[];
           let algoOrders: any[] = [];
           let algoFetchError = "";
@@ -405,8 +390,6 @@ export function startTaskRecoveryLoop(
           } catch (e: any) {
             algoFetchError = e?.message || "unknown";
           }
-          
-          console.log(`[DEBUG] Recovery #${task.id}: openOrders=${openOrders.length}, algoOrders=${algoOrders.length}${algoFetchError ? `, algoError=${algoFetchError}` : ""}`);
           
           const allOpenIds = new Set<string>();
           for (const o of [...openOrders, ...algoOrders]) {
@@ -422,26 +405,16 @@ export function startTaskRecoveryLoop(
             ids.forEach(id => allOpenIds.add(id));
           }
           
-          console.log(`[DEBUG] Recovery #${task.id}: allOpenIds=[${Array.from(allOpenIds).slice(0, 10).join(", ")}${allOpenIds.size > 10 ? "..." : ""}]`);
-          
           // Проверяем сколько entry ордеров еще открыто
           const stillOpen = entryIds.filter(id => allOpenIds.has(String(id)));
-          const notOpen = entryIds.filter(id => !allOpenIds.has(String(id)));
-          
-          console.log(`[DEBUG] Recovery #${task.id}: stillOpen=${stillOpen.length}, notOpen=${notOpen.length}`);
           
           // Если все entry ордера еще открыты — задача ждёт
-          if (stillOpen.length === entryIds.length) {
-            console.log(`[DEBUG] Recovery #${task.id}: все entry ордера открыты, ждём`);
-            continue;
-          }
+          if (stillOpen.length === entryIds.length) continue;
           
           // ✅ ИСПРАВЛЕНО: Проверяем позицию СРАЗУ, это главный индикатор
           const filters = ex.getSymbolFilters(symbol);
           const posSize = Math.abs(await ex.fetchPositionSize(symbol).catch(() => 0));
           const hasPosition = posSize > (filters?.minQty || 0) * 0.5;
-          
-          console.log(`[DEBUG] Recovery #${task.id}: posSize=${posSize}, hasPosition=${hasPosition}`);
           
           // Если есть открытые ордера — ждём
           if (stillOpen.length > 0) {
@@ -462,8 +435,7 @@ export function startTaskRecoveryLoop(
             continue;
           }
           
-          // ✅ КРИТИЧНО: Нет позиции И нет открытых entry ордеров → task отменён
-          console.log(`[DEBUG] Recovery #${task.id}: НЕТ позиции И НЕТ entry ордеров → ОТМЕНЯЕМ`);
+          // Нет позиции И нет открытых entry ордеров → task отменён
           book.set(task, "canceled");
           book.remove(task.id);
           const msg = `🚫 Задача #${task.id} ${symbol} отменена (entry ордера сняты, позиции нет)`;

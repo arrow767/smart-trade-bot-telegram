@@ -291,7 +291,6 @@ export async function runCommand(
     const risk = parsed.risk;
     const customCoef = parsed.coef; // Кастомный коэффициент из команды
     
-    console.log(`[CALC DEBUG] parsed.coef=${customCoef}, type=${typeof customCoef}`);
     
     if (!Number.isFinite(risk) || risk <= 0) {
       info(mode === "console" 
@@ -305,7 +304,6 @@ export async function runCommand(
       const finalCoef = (typeof customCoef === "number" && Number.isFinite(customCoef) && customCoef > 0) 
         ? customCoef 
         : DEFAULT_NATR_CONFIG.coef;
-      console.log(`[CALC DEBUG] finalCoef=${finalCoef}, DEFAULT=${DEFAULT_NATR_CONFIG.coef}`);
       const config = { ...DEFAULT_NATR_CONFIG, coef: finalCoef };
       const result = await calculateRisk(ex, ticker, risk, config);
       const formatted = mode === "console" 
@@ -1012,9 +1010,7 @@ export async function runCommand(
           });
         }
       }
-    } catch (e: any) {
-      console.log(`[DEBUG] task_info fetchOpenOrders error: ${e?.message || e}`);
-    }
+    } catch {}
 
     let riskUsd: number | undefined = undefined;
     try {
@@ -1342,12 +1338,7 @@ export async function runCommand(
         
         for (;;) {
           // ✅ КРИТИЧНО: Если задача удалена из book (например через cancel) — выходим из цикла
-          if (!book.get(task.id)) {
-            if (mode === "console") {
-              console.log(`[DEBUG] Task #${task.id} no longer exists in book, exiting MARKET loop`);
-            }
-            return;
-          }
+          if (!book.get(task.id)) return;
           
           try {
           const tick = await ex.fetchTicker(symbolCcxt);
@@ -1476,10 +1467,6 @@ export async function runCommand(
             } catch {}
             
             const stillFlat = posCheck2 < minQ && posCheck3 < minQ;
-            
-            if (mode === "console") {
-              console.log(`[DEBUG] Market flat double-check: posCheck2=${posCheck2}, posCheck3=${posCheck3}, stillFlat=${stillFlat}`);
-            }
             
             if (stillFlat) {
               // позиция вручную закрыта или сработал SL — чистим ордера и удаляем задачу
@@ -1733,12 +1720,7 @@ export async function runCommand(
       for (;;) {
         // ✅ КРИТИЧНО: Если задача удалена из book (например через cancel) — выходим из цикла
         const currentTask = book.get(task.id);
-        if (!currentTask) {
-          if (mode === "console") {
-            console.log(`[DEBUG] Task #${task.id} no longer exists in book, exiting LIMIT/STOP loop`);
-          }
-          return;
-        }
+        if (!currentTask) return;
         
         if (currentTask.cancelRequested) {
           await cancelBracketOnly(ex, symbolCcxt, keep).catch(() => {});
@@ -1794,12 +1776,6 @@ export async function runCommand(
           if (clientId) allOpenOrderIds.add(clientId);
         }
         
-        // ✅ ЛОГИРОВАНИЕ: что мы получили с биржи
-        if (mode === "console" && (posSize > 0 || entryIds.length > 0)) {
-          console.log(`[DEBUG] Fetched orders: regular=${open.length}, algo=${algoOrders.length}, algoFailed=${algoOrdersFetchFailed}, allOpenOrderIds.size=${allOpenOrderIds.size}`);
-          console.log(`[DEBUG] Entry IDs we're tracking: ${Array.from(entryIds).join(", ")}`);
-          console.log(`[DEBUG] All open order IDs: ${Array.from(allOpenOrderIds).join(", ")}`);
-        }
         
         // Проверяем какие входные ордера ещё открыты (по ID или clientOrderId)
         const entriesLeft = entryIds.filter(id => {
@@ -1832,11 +1808,7 @@ export async function runCommand(
                           String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
                         );
           if (!exists) {
-            // Ордер исчез - удаляем из keep
             keep.delete(id);
-            if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} disappeared from open orders, removed from keep`);
-            }
           }
         }
 
@@ -1872,10 +1844,6 @@ export async function runCommand(
           } catch {}
           
           const stillFlat = recheck1 < minQty * 0.5 && recheck2 < minQty * 0.5;
-          
-          if (mode === "console") {
-            console.log(`[DEBUG] Manual close double-check: recheck1=${recheck1}, recheck2=${recheck2}, stillFlat=${stillFlat}`);
-          }
           
           if (stillFlat) {
             // Позиция точно закрыта - отменяем все ордера и удаляем задачу
@@ -1937,10 +1905,6 @@ export async function runCommand(
           
           const canRemove = canRemoveByEntryGone || canRemoveByAllClear;
           
-          if (mode === "console") {
-            console.log(`[DEBUG] Task removal check: flat=${flat}, totalOrders=${totalOrdersOnSymbol}, allOrdersGone=${allOrdersGone}, timeSinceCreated=${timeSinceCreated}ms, ordersEverSeen=${ordersEverSeen}, algoFailed=${algoOrdersFetchFailed}, canRemoveByEntryGone=${canRemoveByEntryGone}, canRemoveByAllClear=${canRemoveByAllClear}`);
-          }
-          
           if (canRemove) {
             // ✅ ДВОЙНАЯ ПРОВЕРКА перед удалением
             await new Promise(r => setTimeout(r, 1500));
@@ -1964,19 +1928,11 @@ export async function runCommand(
             
             const stillClear = recheck1 < minQty * 0.5 && recheck2 < minQty * 0.5 && recheckOrders === 0;
             
-            if (mode === "console") {
-              console.log(`[DEBUG] Task removal double-check: recheck1=${recheck1}, recheck2=${recheck2}, recheckOrders=${recheckOrders}, stillClear=${stillClear}`);
-            }
-            
             if (!stillClear) {
               // Не прошла двойная проверка - пропускаем
               continue;
             }
             
-            // Логируем для отладки
-            if (mode === "console") {
-              console.log(`[DEBUG] ✅ TASK REMOVAL CONFIRMED: taskId=${task.id}, symbol=${symbolCcxt}, removing...`);
-            }
             // ✅ КРИТИЧНО: Проверяем, есть ли другие задачи на этот символ с активными входами
             const otherTasks = book.getBySymbol(symbolCcxt).filter(t => t.id !== task.id);
             const otherHasActiveEntries = otherTasks.some(t => 
@@ -2025,9 +1981,6 @@ export async function runCommand(
             book.updateTaskEntry(tt, entryAvg, newQty);
           }
           
-          if (mode === "console") {
-            console.log(`[DEBUG] Task #${task.id} entry updated: qty=${fmtQty5(taskFilledQty)}, avg=${taskEntryAvgCalc.toFixed(4)}`);
-          }
         }
 
         // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
@@ -2069,9 +2022,6 @@ export async function runCommand(
             
             // Если сумма TP не соответствует позиции - пересчитываем
             if (Math.abs(totalTpQty - posSize) > 1e-9) {
-              if (mode === "console") {
-                console.log(`[DEBUG] TP qty mismatch: ${totalTpQty} vs pos=${posSize}, recalculating...`);
-              }
               // Снимаем старые TP
               for (const o of currentTPOrders) {
                 if (o.id) {
@@ -2096,21 +2046,7 @@ export async function runCommand(
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
         const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow);
         
-        // ✅ ЛОГИРОВАНИЕ для отладки
-        if (mode === "console") {
-          console.log(`[DEBUG] === CYCLE CHECK ===`);
-          console.log(`[DEBUG] Position: posSize=${posSize}, entryAvg=${entryAvg}, hasPosition=${hasPosition}`);
-          console.log(`[DEBUG] Orders: entriesLeft=${entriesLeft}, entryIds=${Array.from(entryIds).join(", ")}`);
-          console.log(`[DEBUG] TP/SL: tpsPlaced=${tpsPlaced}, slPxCurrent=${slPxCurrent}, shouldPlaceTP_SL=${shouldPlaceTP_SL}`);
-          if (hasPosition) {
-            console.log(`[DEBUG] ✅ POSITION EXISTS! Will place TP/SL: ${shouldPlaceTP_SL}`);
-          }
-        }
-
         if (shouldPlaceTP_SL) {
-          if (mode === "console") {
-            console.log(`[DEBUG] 🚀 PLACING TP/SL: posSize=${posSize}, entryAvg=${entryAvg}`);
-          }
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
 
@@ -2178,9 +2114,6 @@ export async function runCommand(
             // ✅ УПРОЩЕНО: Выставляем TP если они ещё не выставлены
             // Не зависим от entriesLeft или lastSize - если позиция есть и TP не выставлены → выставляем
             if (!tpsPlaced) {
-              if (mode === "console") {
-                console.log(`[DEBUG] 🚀 PLACING TP: entriesLeft=${entriesLeft}, lastSize=${lastSize}, posSize=${posSize}`);
-              }
               try {
                 // ✅ КРИТИЧНО: Проверяем что позиция реально существует на бирже
                 const actualPosSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
@@ -2441,9 +2374,6 @@ export async function runCommand(
                         );
           if (!exists) {
             keep.delete(id);
-            if (mode === "console") {
-              console.log(`[DEBUG] Order ${id} not found in allOpenOrders, removed from keep`);
-            }
           }
         }
 

@@ -24,9 +24,6 @@ async function main(){
     try{
       const parsed = parseLine(line);
       // DEBUG: показать что распарсилось для risk_calc
-      if (parsed?.kind === "risk_calc") {
-        console.log(`[DEBUG] parsed risk_calc: ticker=${parsed.ticker}, risk=${parsed.risk}, coef=${parsed.coef}`);
-      }
       if (!parsed) { console.log("Неверный ввод. Пример: l xrp 5000 3"); rl.prompt(); return; }
       if (parsed.kind === "exit"){ console.log("Выход."); process.exit(0); }
       await runCommand(ex, book, parsed, (m)=>console.log(m), (m)=>console.log(m), "console");
