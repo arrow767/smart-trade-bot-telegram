@@ -386,7 +386,19 @@ bot.action("ORDERS", async (ctx)=>{
   try {
     if (!isAllowed(ctx)) return deny(ctx);
     await safeAnswerCbQuery(ctx);
-    await runCommand(ex, book, { kind:"orders" }, (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), (m)=>safeReply(ctx, m,{parse_mode:"HTML"}), "telegram");
+    console.log("[ORDERS] Fetching orders...");
+    await runCommand(ex, book, { kind:"orders" }, 
+      async (m) => {
+        console.log(`[ORDERS] Sending ${m.length} chars to Telegram`);
+        const result = await safeReply(ctx, m, {parse_mode:"HTML"});
+        console.log(`[ORDERS] safeReply result: ${result ? 'sent' : 'blocked/failed'}`);
+      }, 
+      async (m) => {
+        console.log(`[ORDERS] Sending info ${m.length} chars`);
+        await safeReply(ctx, m, {parse_mode:"HTML"});
+      }, 
+      "telegram"
+    );
   } catch (e:any) {
     console.error("ORDERS action error:", e);
     try { await safeReply(ctx, `Ошибка orders: <code>${escapeHtml(e?.message||String(e))}</code>`, { parse_mode:"HTML" }); } catch {}
