@@ -136,9 +136,7 @@ async function cancelAllOrdersForSymbol(ex: BinanceFutures, symbolCcxt: string):
       }
     } catch {}
     
-    console.log(`[CANCEL] Все ордера по ${symbolCcxt} сняты`);
-  } catch (e: any) {
-    console.warn(`[CANCEL] Ошибка снятия ордеров по ${symbolCcxt}: ${e?.message || e}`);
+  } catch {
   }
 }
 
@@ -1213,7 +1211,6 @@ export async function runCommand(
   let calculatedRiskUsd: number | undefined = riskUsdOverride;
   if (typeof riskPercentOverride === "number" && riskPercentOverride > 0) {
     calculatedRiskUsd = await calculateRiskFromPercent(ex, riskPercentOverride);
-    console.log(`[RISK] ${riskPercentOverride}% от депозита (${DEPOSIT_SOURCE}) = $${calculatedRiskUsd.toFixed(2)}`);
   }
   const side = dir === "l" ? "long" : "short";
   const sideEntry = side === "long" ? "buy" : "sell";
@@ -1228,14 +1225,12 @@ export async function runCommand(
   // ✅ НОВОЕ: Если нет override и пресет использует % от депозита — рассчитываем
   if (!calculatedRiskUsd && preset.risk_type === "percent") {
     calculatedRiskUsd = await calculateRiskFromPercent(ex, preset.trade_risk);
-    console.log(`[RISK] Пресет "${presetNameEffective}": ${preset.trade_risk}% от депозита (${DEPOSIT_SOURCE}) = $${calculatedRiskUsd.toFixed(2)}`);
   }
   
   // ✅ КРИТИЧНО: Если риск всё ещё не установлен - берём из пресета (для типа "money")
   // Это гарантирует что task.riskUsd ВСЕГДА будет сохранён
   if (!calculatedRiskUsd && preset.trade_risk > 0) {
     calculatedRiskUsd = preset.trade_risk;
-    console.log(`[RISK] Пресет "${presetNameEffective}": $${calculatedRiskUsd} (money)`);
   }
   
   // ✅ Пытаемся загрузить market (с автоперезагрузкой если не найден), но не прерываем работу
