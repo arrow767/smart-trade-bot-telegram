@@ -525,6 +525,15 @@ export function startTaskRecoveryLoop(
           emptySinceBySymbol.delete(symbol);
           const task = pickTaskForSymbol(ts, pos.side);
           if (task) {
+            // ✅ НОВОЕ: Инициализируем taskEntryAvg/taskEntryQty для старых задач
+            // Если поля не заполнены - берём данные с биржи (для совместимости со старыми задачами)
+            const posSize = Math.abs(pos.contracts ?? 0);
+            const entryAvg = Number(pos.entryPrice ?? 0);
+            if ((!task.taskEntryAvg || task.taskEntryAvg <= 0) && entryAvg > 0 && posSize > 0) {
+              book.setTaskEntry(task, entryAvg, posSize);
+              log(`🔄 Recovery: инициализированы entry данные для #${task.id} ${symbol}: avg=${entryAvg}, qty=${fmtQty5(posSize)}`);
+            }
+            
             try {
               await ensureBracketsForTask(ex, book, task, pos, log);
             } catch (e: any) {
