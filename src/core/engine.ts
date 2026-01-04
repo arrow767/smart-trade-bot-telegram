@@ -158,7 +158,7 @@ async function cancelAllOrdersForSymbol(ex: BinanceFutures, symbolCcxt: string):
 async function handleTaskChaining(
   ex: BinanceFutures,
   book: TaskBook,
-  newTask: { id: number; symbolCcxt: string; side: "long" | "short"; presetName?: string; riskUsd?: number },
+  newTask: { id: number; symbolCcxt: string; side: "long" | "short"; presetName?: string; riskUsd?: number; totalUsd?: number },
   newTaskEntryAvg: number,
   newTaskEntryQty: number,
   totalPositionQty: number,
@@ -174,24 +174,19 @@ async function handleTaskChaining(
   // Получаем старые активные задачи на том же символе в том же направлении
   const olderTasks = book.getOlderActiveTasksForSymbolSide(symbolCcxt, side, newTaskId);
   
+  console.log(`[CHAIN] Task #${newTaskId} ${symbolCcxt} ${side}: found ${olderTasks.length} older tasks`);
+  
   if (olderTasks.length === 0) {
     return { chainHandled: false, supersededTaskIds: [] };
   }
 
-  // Проверяем условие "в сторону профита":
-  // Для LONG: новая цена входа ВЫШЕ старой
-  // Для SHORT: новая цена входа НИЖЕ старой
+  // ✅ ИСПРАВЛЕНО: Пересчитываем SL/TP для ЛЮБОЙ новой task (не только в сторону профита)
+  // Старая логика "isProfitDirection" убрана — всегда supersede старые tasks
   const supersededTaskIds: number[] = [];
   
   for (const oldTask of olderTasks) {
     const oldEntryAvg = oldTask.taskEntryAvg || 0;
-    if (oldEntryAvg <= 0) continue; // нет данных о входе
-    
-    const isProfitDirection = side === "long" 
-      ? newTaskEntryAvg > oldEntryAvg 
-      : newTaskEntryAvg < oldEntryAvg;
-    
-    if (!isProfitDirection) continue;
+    console.log(`[CHAIN] Checking old task #${oldTask.id}: oldEntryAvg=${oldEntryAvg}`);
     
     // Цепочка! Отменяем старую задачу
     log(`🔗 Цепочка: task #${newTaskId} supersedes task #${oldTask.id} (${side}, ${oldEntryAvg} → ${newTaskEntryAvg})`);
@@ -2036,6 +2031,46 @@ export async function runCommand(
           }
           
           console.log(`[FILL] Task #${task.id}: delta=${fmtQty5(newQty)}, fillPrice=${fillPrice.toFixed(4)}, entryAvg(exchange)=${entryAvg.toFixed(4)}`);
+          
+          // ✅ НОВОЕ: Сразу вызываем handleTaskChaining при КАЖДОМ fill
+          // Это нужно чтобы SL пересчитывался сразу, не дожидаясь entriesLeft === 0
+          if (!chainHandled && !noPreset && tt?.side && taskFilledQty > 0) {
+            const taskEntryAvgCalc = taskFilledValue / taskFilledQty;
+            try {
+              const chainResult = await handleTaskChaining(
+                ex,
+                book,
+                { 
+                  id: tt.id, 
+                  symbolCcxt: tt.symbolCcxt, 
+                  side: tt.side, 
+                  presetName: tt.presetName,
+                  riskUsd: tt.riskUsd,
+                  totalUsd: tt.totalUsd
+                },
+                taskEntryAvgCalc,
+                taskFilledQty,
+                posSize,
+                mark,
+                (m) => info(mode === "console" ? m : `<b>${m}</b>`)
+              );
+              
+              if (chainResult.chainHandled) {
+                chainHandled = true;
+                // SL/TP уже выставлены в handleTaskChaining — пропускаем обычную логику
+                slPxCurrent = 1; // Помечаем что SL есть
+                
+                if (chainResult.supersededTaskIds.length > 0) {
+                  info(mode === "console" 
+                    ? `🔗 Цепочка: задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
+                    : `<b>🔗 Цепочка:</b> задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
+                  );
+                }
+              }
+            } catch (e: any) {
+              console.error(`[ERROR] handleTaskChaining on fill: ${e?.message}`);
+            }
+          }
         }
 
         // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
@@ -2307,7 +2342,8 @@ export async function runCommand(
                       symbolCcxt: tt.symbolCcxt, 
                       side: tt.side, 
                       presetName: tt.presetName,
-                      riskUsd: tt.riskUsd
+                      riskUsd: tt.riskUsd,
+                      totalUsd: tt.totalUsd
                     },
                     taskEntryAvgCalc,
                     taskFilledQty,
@@ -2324,12 +2360,7 @@ export async function runCommand(
                     slPxCurrent = 1; // Помечаем что SL есть (точное значение не важно)
                     planSent = true;
                     
-                    if (chainResult.supersededTaskIds.length > 0) {
-                      info(mode === "console" 
-                        ? `🔗 Цепочка: задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
-                        : `<b>🔗 Цепочка:</b> задачи ${chainResult.supersededTaskIds.map(id => `#${id}`).join(", ")} заменены задачей #${tt.id}`
-                      );
-                    }
+                    // Сообщение о цепочке уже отправлено в блоке increased
                   }
                 } catch (e: any) {
                   console.error(`[ERROR] handleTaskChaining failed: ${e?.message}`);
