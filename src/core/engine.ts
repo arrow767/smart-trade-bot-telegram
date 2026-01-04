@@ -1418,8 +1418,11 @@ export async function runCommand(
 
               // TP ставим только если их реально нет
               if (!hasTPNow && !tpsPlaced) {
+                // ✅ КРИТИЧНО: TP цены от средней TASK (slEntryAvg), объём от TASK (slEntryQty)
+                // Но КОЛИЧЕСТВО TP — на всю позицию (posSize)
+                const taskPositionUsdForTP = slEntryQty * slEntryAvg;
                 const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
+                const re = planTargets({ side, entryPrice: slEntryAvg, positionUsd: taskPositionUsdForTP, preset: planningPreset });
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -1442,10 +1445,10 @@ export async function runCommand(
                 tpsPlaced = true;
                 tpMessageSent = true; // ✅ Помечаем что сообщение уже отправлено
 
-                // ✅ Отправляем план только один раз
+                // ✅ Отправляем план только один раз (показываем среднюю TASK, не позиции)
                 if (!planSent) {
                   info(formatPlan(mode, {
-                    entryPx: Number(ex.priceToPrecision(symbolCcxt, entryAvg)),
+                    entryPx: Number(ex.priceToPrecision(symbolCcxt, slEntryAvg)),
                     sl: String(ex.priceToPrecision(symbolCcxt, safeSL)),
                     tps: re.tpPrices.map((p, i) => ({ price: String(ex.priceToPrecision(symbolCcxt, p)), qty: 0, R: preset.take_profit[i] })),
                   }));
@@ -2362,15 +2365,30 @@ export async function runCommand(
         if (!noPreset && !tpsPlaced && entriesLeft === 0 && posSize > 0) {
           try {
             const filters = ex.getSymbolFilters(symbolCcxt);
-            const totalPlannedUsd = task.totalUsd ?? posSize * entryAvg;
             const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
-            const baseRisk = Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk;
+            const baseRisk = 
+              (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
+                ? task.riskUsd
+                : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
+            
+            // ✅ КРИТИЧНО: TP цены от средней TASK (taskEntryAvg), расстояние от объёма TASK
+            const currentTaskFallback = book.get(task.id);
+            const tpEntryAvgFallback = currentTaskFallback?.taskEntryAvg || entryAvg;
+            const tpEntryQtyFallback = task.totalUsd && task.totalUsd > 0 && tpEntryAvgFallback > 0
+              ? task.totalUsd / tpEntryAvgFallback
+              : posSize;
+            const taskPositionUsdFallback = tpEntryQtyFallback * tpEntryAvgFallback;
+            
             const planningPreset = { ...presetForRisk, trade_risk: baseRisk } as any;
-            const re = planTargets({ side, entryPrice: entryAvg, positionUsd: posSize * entryAvg, preset: planningPreset });
+            const re = planTargets({ side, entryPrice: tpEntryAvgFallback, positionUsd: taskPositionUsdFallback, preset: planningPreset });
             let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
             tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
-            for (let i = 0; i < re.tpPrices.length; i++) {
+            
+            // ✅ НОВОЕ: Пропускаем уже заполненные (съеденные) TP
+            const filledTpCountFallback = currentTaskFallback?.filledTpCount || 0;
+            
+            for (let i = filledTpCountFallback; i < re.tpPrices.length; i++) {
               const q = tpQtys[i];
               if (q <= 0) continue;
               const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
