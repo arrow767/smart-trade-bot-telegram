@@ -143,9 +143,18 @@ async function ensureBracketsForTask(
 
   const hasSL = hasClosePositionSL(all);
   
-  // ✅ ВАЖНО: Если есть хотя бы ОДНА TP лимитка — НЕ трогаем их
-  // Это предотвращает бесконечное пересоздание TP после частичного исполнения
-  const hasTP = hasAnyReduceOnlyTP(all);
+  // ✅ Получаем все TP ордера
+  const existingTPs = all.filter((o: any) => {
+    const ro = o?.reduceOnly === true || o?.info?.reduceOnly === true || 
+               o?.reduceOnly === "true" || o?.info?.reduceOnly === "true";
+    const cp = o?.closePosition === true || o?.info?.closePosition === true ||
+               o?.closePosition === "true" || o?.info?.closePosition === "true";
+    const t = String(o?.type || o?.orderType || o?.info?.type || "").toUpperCase();
+    const isTPAlgo = t.includes("TAKE_PROFIT");
+    const isTPLimit = (ro || cp) && (t === "LIMIT" || t.includes("LIMIT")) && !t.includes("STOP");
+    return isTPAlgo || isTPLimit;
+  });
+  const hasTP = existingTPs.length > 0;
 
   const preset = await getPreset(task.presetName || DEFAULT_PRESET);
   const side = task.side || pos.side;
@@ -189,8 +198,46 @@ async function ensureBracketsForTask(
     }
   }
   
+  // ✅ НОВОЕ: Проверяем нужно ли пересчитать TP (если цены неправильные)
+  // НО: если TP съели (filled) — не пересчитываем, только если цены не совпадают
+  let needRecalcTP = false;
+  let correctTPPrices: number[] = [];
+  
+  // Рассчитываем правильные цены TP от средней ЭТОЙ task
+  const tpEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
+  const tpRiskUsd = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
+  
+  // Для расчёта цен TP используем среднюю task, но объём будет вся позиция
+  const planningForPrices = { ...preset, trade_risk: tpRiskUsd } as any;
+  const tpResult = planTargets({ 
+    side, 
+    entryPrice: tpEntryAvg,  // ✅ Цены от средней ЭТОЙ task
+    positionUsd: actualPosSize * tpEntryAvg,  // Для расчёта ratios
+    preset: planningForPrices 
+  });
+  correctTPPrices = tpResult.tpPrices.map(p => Number(ex.priceToPrecision(symbol, p)));
+  
+  if (hasTP && correctTPPrices.length > 0) {
+    // Проверяем соответствие цен существующих TP
+    const existingTPPrices = existingTPs
+      .map((o: any) => Number(o?.price || o?.info?.price || 0))
+      .filter((p: number) => p > 0)
+      .sort((a: number, b: number) => side === "long" ? a - b : b - a);
+    
+    // Сравниваем первую (ближайшую) цену TP — если отличается >2%, пересчитываем
+    if (existingTPPrices.length > 0 && correctTPPrices.length > 0) {
+      const firstExisting = existingTPPrices[0];
+      const firstCorrect = correctTPPrices[0];
+      const diff = Math.abs(firstExisting - firstCorrect) / Math.max(firstCorrect, 1e-12);
+      if (diff > 0.02) {
+        needRecalcTP = true;
+        log(`🔄 Recovery: TP пересчитываются для #${task.id} ${symbol} (${firstExisting} → ${firstCorrect}, diff=${(diff * 100).toFixed(1)}%)`);
+      }
+    }
+  }
+  
   // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть И не нужен пересчёт
-  if (hasSL && !needRecalcSL && hasTP) {
+  if (hasSL && !needRecalcSL && hasTP && !needRecalcTP) {
     return;
   }
   
@@ -245,7 +292,7 @@ async function ensureBracketsForTask(
     }
   }
 
-  if (!hasTP) {
+  if (!hasTP || needRecalcTP) {
     // ✅ КРИТИЧНО: Проверяем позицию перед размещением TP
     let currentPosSize = actualPosSize;
     try {
@@ -258,21 +305,26 @@ async function ensureBracketsForTask(
       console.warn(`[WARN] Recovery TP: ошибка получения позиции для ${symbol}: ${e?.message}`);
     }
     
-    const positionUsd = currentPosSize * entryAvg;
-    // ✅ КРИТИЧНО: Используем риск из задачи, а не из текущего пресета
-    const planningPreset = { ...preset, trade_risk: effectiveRiskUsd } as any;
-    const re = planTargets({ side, entryPrice: entryAvg, positionUsd, preset: planningPreset });
+    // ✅ Если пересчёт — снимаем старые TP
+    if (needRecalcTP && existingTPs.length > 0) {
+      for (const tpOrder of existingTPs) {
+        const orderId = String(tpOrder.algoId || tpOrder.id);
+        try { await ex.cancelOrder(symbol, orderId); } catch {}
+      }
+    }
     
+    // ✅ ИСПРАВЛЕНО: Используем уже рассчитанные correctTPPrices (от средней task)
+    // Объём TP = вся позиция (currentPosSize)
     let tpQtys = splitQtyToStep(currentPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
     tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbol, q)));
 
     let placed = 0;
     let errors: string[] = [];
-    for (let i = 0; i < re.tpPrices.length; i++) {
+    for (let i = 0; i < correctTPPrices.length; i++) {
       const q = tpQtys[i];
       if (!(q > 0) || q < filters.minQty) continue;
-      const p = Number(ex.priceToPrecision(symbol, re.tpPrices[i]));
+      const p = correctTPPrices[i];
       try {
         const result = await ex.createReduceOnlyLimit(symbol, sideExit as any, q, p);
         // ✅ Проверяем что ордер реально создан
@@ -292,7 +344,8 @@ async function ensureBracketsForTask(
       }
     }
     if (placed > 0) {
-      log(`🧯 Recovery: TP выставлены для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(currentPosSize)})`);
+      const action = needRecalcTP ? "пересчитаны" : "выставлены";
+      log(`🧯 Recovery: TP ${action} для #${task.id} ${symbol} (${side}) — ${placed} ордеров (pos≈${fmtQty5(currentPosSize)})`);
     } else if (errors.length > 0) {
       console.warn(`[WARN] Recovery TP: не удалось выставить TP для #${task.id} ${symbol}: ${errors.join(", ")}`);
     }

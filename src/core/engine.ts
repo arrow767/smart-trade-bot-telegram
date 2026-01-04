@@ -2108,10 +2108,13 @@ export async function runCommand(
                 } else {
                   // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи
                 const actualPosSizeForTP = actualPosSize;
-                const actualPositionUsd = actualPosSizeForTP * entryAvg;
+                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю ЭТОЙ task
+                // Но ОБЪЁМ TP = вся позиция
+                const tpEntryAvg = slEntryAvg; // Средняя ЭТОЙ task для расстояния TP
+                const actualPositionUsd = actualPosSizeForTP * tpEntryAvg;
                 
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: entryAvg, positionUsd: actualPositionUsd, preset: planningPreset2 });
+                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: actualPositionUsd, preset: planningPreset2 });
 
                 let tpQtys = splitQtyToStep(actualPosSizeForTP, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
