@@ -1367,18 +1367,26 @@ export async function runCommand(
           if (shouldPlaceTP_SL) {
             const filters = ex.getSymbolFilters(symbolCcxt);
             const positionUsd = posSize * entryAvg;
+            
+            // ✅ КЛЮЧЕВОЕ: Для SL используем данные ЭТОЙ task (важно для цепочки)
+            const currentTask = book.get(task.id);
+            const slEntryAvg = currentTask?.taskEntryAvg || entryAvg;
+            const slEntryQty = currentTask?.taskEntryQty || posSize;
 
             const totalUsd = task.totalUsd ?? positionUsd;
             const baseRisk =
               (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
                 ? task.riskUsd
                 : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : preset.trade_risk);
-            const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, positionUsd / Math.max(1, totalUsd));
+            // ✅ factor от объёма ЭТОЙ task
+            const taskPlannedUsd = task.totalUsd ?? (slEntryQty * slEntryAvg);
+            const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, (slEntryQty * slEntryAvg) / Math.max(1, taskPlannedUsd));
             const effectiveRiskUsd = baseRisk * factor;
 
             // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
             if (!noPreset) {
-              const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+              // ✅ SL: от средней и объёма ЭТОЙ task
+              const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, effectiveRiskUsd);
               const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
               const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
               const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
@@ -1481,15 +1489,18 @@ export async function runCommand(
           } catch (cycleErr: any) {
             // ✅ НОВОЕ: Обработка временных ошибок в MARKET цикле
             const errMsg = String(cycleErr?.message || cycleErr || "");
+            const isRateLimit = /429|Too Many Requests|-1003/i.test(errMsg) || cycleErr?.code === -1003;
             const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) ||
-                                cycleErr?.code === -1000 || cycleErr?.code === -1007;
+                                cycleErr?.code === -1000 || cycleErr?.code === -1007 || isRateLimit;
             
             if (isTemporary) {
               tempErrorCountMarket++;
-              if (tempErrorCountMarket % MAX_TEMP_ERRORS_MARKET === 1) {
+              if (tempErrorCountMarket % MAX_TEMP_ERRORS_MARKET === 1 && !isRateLimit) {
                 console.warn(`[WARN] Temporary error in MARKET task #${task.id}: ${errMsg.slice(0, 100)}`);
               }
-              await new Promise((r) => setTimeout(r, 2000));
+              // ✅ Rate limit: ждём дольше
+              const delay = isRateLimit ? 10000 : 2000;
+              await new Promise((r) => setTimeout(r, delay));
               continue;
             }
             throw cycleErr;
@@ -1498,15 +1509,15 @@ export async function runCommand(
           await new Promise((r) => setTimeout(r, 1000));
         }
       } catch (err: any) {
-        const t = book.get(task.id);
-        if (t) book.set(t, "error", err?.message ?? err);
-        // ✅ ИСПРАВЛЕНО: Не отправляем временные ошибки в Telegram
         const errMsg = String(err?.message || err || "");
-        const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg);
-        if (!isTemporary) {
+        const isRateLimit = /429|Too Many Requests|-1003/i.test(errMsg) || err?.code === -1003;
+        const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) || isRateLimit;
+        
+        // ✅ Не ставим error статус для rate limit и временных ошибок
+        if (!isRateLimit && !isTemporary) {
+          const t = book.get(task.id);
+          if (t) book.set(t, "error", err?.message ?? err);
           info(`❌ [ERROR] ${errMsg}`);
-        } else {
-          console.error(`[ERROR] MARKET task #${task.id} failed: ${errMsg}`);
         }
       }
     })();
@@ -2044,6 +2055,12 @@ export async function runCommand(
         if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
           const positionUsd = posSize * entryAvg;
+          
+          // ✅ КЛЮЧЕВОЕ: Для SL используем данные ЭТОЙ task, а не всей позиции
+          // Это важно для цепочки задач - SL рассчитывается от объёма/риска текущей task
+          const currentTask = book.get(task.id);
+          const slEntryAvg = currentTask?.taskEntryAvg || entryAvg;
+          const slEntryQty = currentTask?.taskEntryQty || posSize;
 
           const totalPlannedUsd = task.totalUsd ?? positionUsd;
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
@@ -2051,12 +2068,15 @@ export async function runCommand(
             (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
               ? task.riskUsd
               : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
-          const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+          // ✅ factor для риска: относительно объёма ЭТОЙ task, не всей позиции
+          const taskPlannedUsd = task.totalUsd ?? (slEntryQty * slEntryAvg);
+          const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, (slEntryQty * slEntryAvg) / Math.max(1, taskPlannedUsd));
           const effectiveRiskUsd = baseRisk * factor;
 
           // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
           if (!noPreset) {
-            const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, posSize, effectiveRiskUsd);
+            // ✅ SL: рассчитываем от средней и объёма ЭТОЙ task
+            const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, effectiveRiskUsd);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
             const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
             const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
@@ -2378,18 +2398,21 @@ export async function runCommand(
         } catch (cycleErr: any) {
           // ✅ НОВОЕ: Обработка временных ошибок внутри цикла
           const errMsg = String(cycleErr?.message || cycleErr || "");
+          const isRateLimit = /429|Too Many Requests|-1003/i.test(errMsg) || cycleErr?.code === -1003;
           const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) ||
                               cycleErr?.code === -1000 || // Binance Unknown error
-                              cycleErr?.code === -1007;   // Execution status unknown
+                              cycleErr?.code === -1007 || // Execution status unknown
+                              isRateLimit;
           
           if (isTemporary) {
             tempErrorCount++;
-            // Логируем только каждую N-ую ошибку чтобы не спамить
-            if (tempErrorCount % MAX_TEMP_ERRORS_BEFORE_LOG === 1) {
+            // Логируем только каждую N-ую ошибку (но не для rate limit)
+            if (tempErrorCount % MAX_TEMP_ERRORS_BEFORE_LOG === 1 && !isRateLimit) {
               console.warn(`[WARN] Temporary error in task #${task.id} tracking loop (count=${tempErrorCount}): ${errMsg.slice(0, 100)}`);
             }
-            // Продолжаем цикл после короткой паузы
-            await new Promise((r) => setTimeout(r, 3000));
+            // ✅ Rate limit: ждём дольше (10 сек)
+            const delay = isRateLimit ? 10000 : 3000;
+            await new Promise((r) => setTimeout(r, delay));
             continue;
           }
           
@@ -2401,18 +2424,18 @@ export async function runCommand(
         await new Promise((r) => setTimeout(r, 2500));
       }
     } catch (err: any) {
-      const t = book.get(task.id);
-      if (t) {
-        t.error = err?.message ?? err;
-        t.updatedAt = new Date();
-      }
-      // ✅ ИСПРАВЛЕНО: Не отправляем временные ошибки в Telegram
       const errMsg = String(err?.message || err || "");
-      const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg);
-      if (!isTemporary) {
+      const isRateLimit = /429|Too Many Requests|-1003/i.test(errMsg) || err?.code === -1003;
+      const isTemporary = /timeout|timed out|network|ETIMEDOUT|ECONNRESET|ENOTFOUND|fetch/i.test(errMsg) || isRateLimit;
+      
+      // ✅ Не ставим error статус для rate limit и временных ошибок
+      if (!isRateLimit && !isTemporary) {
+        const t = book.get(task.id);
+        if (t) {
+          t.error = err?.message ?? err;
+          t.updatedAt = new Date();
+        }
         info(`❌ [ERROR] ${errMsg}`);
-      } else {
-        console.error(`[ERROR] Task #${task.id} failed with temporary error: ${errMsg}`);
       }
     }
   })();

@@ -64,6 +64,10 @@ function isKnownAlgoError(e: any): { code: number; ignore: boolean } {
   if (code === -2022 || /ReduceOnly.*rejected/i.test(msg)) {
     return { code: -2022, ignore: true };
   }
+  // ✅ НОВОЕ: 429 / -1003: Rate limit - игнорируем, будет retry
+  if (code === -1003 || /429|Too Many Requests|-1003/i.test(msg)) {
+    return { code: -1003, ignore: true };
+  }
   return { code: 0, ignore: false };
 }
 
