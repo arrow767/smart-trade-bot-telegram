@@ -1668,6 +1668,8 @@ export async function runCommand(
 
   // ✅ Собираем цены входов для отображения в tasks/info
   const entryPrices = legs.map(l => l.price);
+  // ✅ КРИТИЧНО: Вычисляем ожидаемую среднюю цену входа ЭТОЙ task
+  const expectedEntryAvg = entryPrices.reduce((a, b) => a + b, 0) / entryPrices.length;
   
   const task = book.add(
     symbolCcxt,
@@ -1675,6 +1677,11 @@ export async function runCommand(
     { side, totalUsd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset, entryPrices }
   );
   book.setEntryOrders(task, entryIds);
+  
+  // ✅ КРИТИЧНО: Сразу устанавливаем ожидаемую цену входа для цепочки!
+  // qty=0 означает что пока ничего не исполнено, но цена известна
+  book.setTaskEntry(task, expectedEntryAvg, 0);
+  
   info(`📥 Выставил ${entryIds.length} входных ордеров.`);
 
   // Фоновый обработчик
@@ -1683,8 +1690,19 @@ export async function runCommand(
   (async () => {
     try {
       const keep = new Set(entryIds);
+      
+      // ✅ КРИТИЧНО: Инициализируем lastSize/lastAvg ТЕКУЩЕЙ позицией
+      // Это нужно для правильного вычисления fillPrice при исполнении
       let lastSize = 0;
       let lastAvg = 0;
+      try {
+        lastSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
+        if (lastSize > 0) {
+          const positions = await ex.fetchAllOpenPositions();
+          const pos = positions.find((p: any) => p.symbol === symbolCcxt);
+          lastAvg = Number(pos?.entryPrice ?? 0);
+        }
+      } catch {}
       let tpsPlaced = false;
       let tpMessageSent = false; // ✅ НОВОЕ: отправлено ли сообщение о TP (отдельно от tpsPlaced)
       let slPxCurrent: number | undefined;
@@ -1983,20 +2001,32 @@ export async function runCommand(
 
         // ✅ НОВОЕ: Обновляем данные о входе этой task при увеличении позиции
         if (increased && entryAvg > 0) {
-          // Предполагаем что увеличение позиции произошло по цене entryAvg (средней позиции)
-          // Это приближение, т.к. мы не знаем точную цену исполнения каждой отложки
           const newQty = delta;
-          const newValue = newQty * entryAvg;
+          
+          // ✅ КРИТИЧНО: Вычисляем РЕАЛЬНУЮ цену исполнения этого ордера!
+          // fillPrice = (newAvg * newSize - oldAvg * oldSize) / delta
+          let fillPrice = entryAvg; // fallback
+          if (lastSize > 0 && lastAvg > 0 && delta > 0) {
+            const newTotal = entryAvg * posSize;
+            const oldTotal = lastAvg * lastSize;
+            fillPrice = (newTotal - oldTotal) / delta;
+            // Санитарная проверка: цена должна быть разумной
+            if (fillPrice <= 0 || !Number.isFinite(fillPrice)) {
+              fillPrice = entryAvg;
+            }
+          }
+          
+          const newValue = newQty * fillPrice;
           taskFilledQty += newQty;
           taskFilledValue += newValue;
           
           // Сохраняем в task для персистентности
-          const taskEntryAvgCalc = taskFilledValue / taskFilledQty;
           const tt = book.get(task.id);
           if (tt) {
-            book.updateTaskEntry(tt, entryAvg, newQty);
+            book.updateTaskEntry(tt, fillPrice, newQty);
           }
           
+          console.log(`[FILL] Task #${task.id}: delta=${fmtQty5(newQty)}, fillPrice=${fillPrice.toFixed(4)}, entryAvg(exchange)=${entryAvg.toFixed(4)}`);
         }
 
         // ✅ ПРОСТАЯ ЛОГИКА: Каждый цикл проверяем позицию
