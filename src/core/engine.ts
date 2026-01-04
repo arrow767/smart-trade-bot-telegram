@@ -2008,44 +2008,11 @@ export async function runCommand(
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
         
-        // ✅ НОВОЕ: Если объём позиции изменился - пересчитываем TP
-        const posSizeChanged = Math.abs(posSize - lastSize) > 1e-9;
-        if (posSizeChanged && posSize > 0 && hasTPNow && !noPreset) {
-          // Проверяем что сумма TP соответствует текущему объёму позиции
-          try {
-            const currentTPOrders = open.filter((o: any) => {
-              const t = String(o?.type || "").toUpperCase();
-              const isLimit = t.includes("LIMIT") && !t.includes("STOP");
-              const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
-              const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
-              return isLimit && ro && !cp;
-            });
-            
-            const totalTpQty = currentTPOrders.reduce((sum: number, o: any) => {
-              const qty = Number(o.amount ?? o.info?.origQty ?? 0) || 0;
-              return sum + qty;
-            }, 0);
-            
-            // Если сумма TP не соответствует позиции - пересчитываем
-            if (Math.abs(totalTpQty - posSize) > 1e-9) {
-              // Снимаем старые TP
-              for (const o of currentTPOrders) {
-                if (o.id) {
-                  try { await ex.cancelOrder(symbolCcxt, o.id); } catch {}
-                }
-              }
-              // Сбрасываем флаг чтобы выставить новые
-              tpsPlaced = false;
-              tpMessageSent = false;
-            }
-          } catch {}
-        }
-        
-        // ✅ ИСПРАВЛЕНО: Если TP сняты — всегда сбрасываем флаг чтобы выставить новые
-        // Не блокируем по tpMessageSent — это только для предотвращения спама сообщений
+        // ✅ ВАЖНО: Если есть хотя бы ОДНА TP лимитка — НЕ трогаем их
+        // Это предотвращает бесконечное пересоздание TP после частичного исполнения
+        // TP ставятся ТОЛЬКО если их вообще нет
         if (!hasTPNow) {
           tpsPlaced = false;
-          // Не сбрасываем tpMessageSent чтобы не спамить (сообщение показываем только при первом размещении)
         }
 
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
