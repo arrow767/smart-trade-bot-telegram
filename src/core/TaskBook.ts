@@ -297,6 +297,20 @@ export class TaskBook {
     }
   }
 
+  /** ✅ НОВОЕ: Получить ВСЕ entry order IDs для символа (все активные tasks) */
+  getAllEntryOrderIdsBySymbol(symbolCcxt: string): string[] {
+    const activeStatuses: TaskStatus[] = ["live", "filled", "waiting_fill", "placing_bracket", "queued"];
+    const ids: string[] = [];
+    for (const t of this.tasks.values()) {
+      if (t.symbolCcxt === symbolCcxt && activeStatuses.includes(t.status)) {
+        if (t.entryOrderIds) {
+          ids.push(...t.entryOrderIds.map(String));
+        }
+      }
+    }
+    return ids;
+  }
+
   /** ✅ НОВОЕ: Получить все входные ордера по символу (для всех задач) */
   getAllEntryOrderIdsBySymbol(symbolCcxt: string): Set<string> {
     const all = new Set<string>();

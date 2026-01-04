@@ -191,8 +191,12 @@ async function handleTaskChaining(
     // Цепочка! Отменяем старую задачу
     log(`🔗 Цепочка: task #${newTaskId} supersedes task #${oldTask.id} (${side}, ${oldEntryAvg} → ${newTaskEntryAvg})`);
     
-    // Снимаем SL/TP старой задачи (bracket)
-    const keepIds = new Set((oldTask.entryOrderIds || []).map(String));
+    // ✅ ИСПРАВЛЕНО: Собираем ВСЕ entry order IDs чтобы не снять их случайно
+    // Включаем entry orders: старой task, новой task, и всех других активных tasks
+    const allEntryIds = book.getAllEntryOrderIdsBySymbol(symbolCcxt);
+    const keepIds = new Set(allEntryIds.map(String));
+    
+    // Снимаем ТОЛЬКО SL/TP (bracket), НЕ entry orders
     try {
       await cancelBracketOnly(ex, symbolCcxt, keepIds);
     } catch (e: any) {
@@ -1418,6 +1422,13 @@ export async function runCommand(
                 const taskTotalUsdForTP = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (slEntryQty * slEntryAvg);
                 const planningPreset = { ...preset, trade_risk: baseRisk } as any;
                 const re = planTargets({ side, entryPrice: slEntryAvg, positionUsd: taskTotalUsdForTP, preset: planningPreset });
+                
+                // 🔍 ДИАГНОСТИКА MARKET TP
+                const rPct = baseRisk / taskTotalUsdForTP * 100;
+                console.log(`[MARKET TP] entry=${slEntryAvg.toFixed(6)}, totalUsd=$${taskTotalUsdForTP.toFixed(2)}, risk=$${baseRisk}, r=${rPct.toFixed(2)}%`);
+                console.log(`[MARKET TP] take_profit multipliers: ${preset.take_profit.join(', ')}`);
+                console.log(`[MARKET TP] TP prices: ${re.tpPrices.map(p => p.toFixed(6)).join(', ')}`);
+                console.log(`[MARKET TP] SL price: ${re.stopPrice.toFixed(6)}, actual safeSL=${safeSL}`);
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
