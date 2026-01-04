@@ -225,6 +225,7 @@ async function ensureBracketsForTask(
   console.log(`  task.taskEntryAvg=${task.taskEntryAvg}, task.taskEntryQty=${task.taskEntryQty}`);
   console.log(`  entryAvg(exchange)=${entryAvg}, actualPosSize=${fmtQty5(actualPosSize)}`);
   console.log(`  preset.take_profit=${JSON.stringify(preset.take_profit)}`);
+  console.log(`  hasSL=${hasSL}, hasTP=${hasTP}, needRecalcSL=${needRecalcSL}`);
   
   const tpResult = planTargets({ 
     side, 
@@ -236,6 +237,7 @@ async function ensureBracketsForTask(
   
   console.log(`  calculated TP prices: ${correctTPPrices.join(', ')}`);
   console.log(`  calculated SL: ${tpResult.stopPrice}`);
+  console.log(`  existing TP prices: ${existingTPs.map((o: any) => o?.price || o?.info?.price).join(', ')}`);
   
   if (hasTP && correctTPPrices.length > 0) {
     // Проверяем соответствие цен существующих TP
