@@ -252,6 +252,13 @@ export class TaskBook {
     this.save();
   }
 
+  /** ✅ НОВОЕ: Установить entryPrices для задачи */
+  setEntryPrices(t: Task, prices: number[]) {
+    t.entryPrices = prices;
+    t.updatedAt = new Date();
+    this.save();
+  }
+
   /** 
    * ✅ НОВОЕ: Получить активную задачу по символу и направлению.
    * Возвращает задачу со статусом live/filled/waiting_fill, 
@@ -309,17 +316,6 @@ export class TaskBook {
       }
     }
     return ids;
-  }
-
-  /** ✅ НОВОЕ: Получить все входные ордера по символу (для всех задач) */
-  getAllEntryOrderIdsBySymbol(symbolCcxt: string): Set<string> {
-    const all = new Set<string>();
-    for (const t of this.tasks.values()) {
-      if (t.symbolCcxt === symbolCcxt && t.entryOrderIds) {
-        t.entryOrderIds.forEach(id => all.add(id));
-      }
-    }
-    return all;
   }
 
   /** 

@@ -87,6 +87,94 @@ function pickTaskForSymbol(tasks: Task[], posSide: "long" | "short"): Task | und
   return undefined;
 }
 
+/**
+ * ✅ НОВОЕ: Автоматический supersede старых tasks при наличии нескольких active на одном символе.
+ * Также пытается восстановить taskEntryAvg для старых tasks из их totalUsd.
+ * 
+ * @returns массив ID задач, которые были superseded
+ */
+function autoSupersedeOlderTasks(
+  book: TaskBook,
+  tasks: Task[],
+  posSide: "long" | "short",
+  posEntryAvg: number,
+  posSize: number,
+  log: (msg: string) => void
+): number[] {
+  const active = new Set(["waiting_fill", "filled", "placing_bracket", "live"]);
+  const notSuperseded = tasks.filter((t) => !t.supersededBy && t.side === posSide && active.has(t.status));
+  
+  if (notSuperseded.length <= 1) {
+    return []; // Только одна или ноль active tasks — ничего не делаем
+  }
+  
+  // Сортируем по ID: самая новая = последняя
+  const sorted = [...notSuperseded].sort((a, b) => a.id - b.id);
+  const newestTask = sorted[sorted.length - 1];
+  const olderTasks = sorted.slice(0, -1);
+  
+  const supersededIds: number[] = [];
+  
+  // Сначала попытаемся восстановить taskEntryAvg для старых задач из их totalUsd
+  // Это нужно для правильного вычисления средней новой задачи
+  let accumulatedQty = 0;
+  let accumulatedValue = 0;
+  
+  for (const oldTask of olderTasks) {
+    // Если у старой задачи нет taskEntryAvg, попробуем вычислить
+    if (!oldTask.taskEntryAvg || oldTask.taskEntryAvg <= 0) {
+      // Если есть entryPrices — используем их
+      if (oldTask.entryPrices && oldTask.entryPrices.length > 0) {
+        const avg = oldTask.entryPrices.reduce((a, b) => a + b, 0) / oldTask.entryPrices.length;
+        const qty = oldTask.totalUsd && oldTask.totalUsd > 0 && avg > 0
+          ? oldTask.totalUsd / avg
+          : 0;
+        if (qty > 0) {
+          book.setTaskEntry(oldTask, avg, qty);
+          log(`🔧 Recovery: АВТОФИКС taskEntryAvg для старой #${oldTask.id}: ${avg.toFixed(4)} (из entryPrices)`);
+        }
+      }
+      // Если нет entryPrices, но есть totalUsd — предполагаем что она набрала ДО добора
+      // В этом случае нужно вычислить её среднюю как "начальную" среднюю позиции
+      // Это сложнее, пока пропускаем
+    }
+    
+    // Накапливаем данные старых задач
+    if (oldTask.taskEntryAvg && oldTask.taskEntryAvg > 0 && oldTask.taskEntryQty && oldTask.taskEntryQty > 0) {
+      accumulatedQty += oldTask.taskEntryQty;
+      accumulatedValue += oldTask.taskEntryAvg * oldTask.taskEntryQty;
+    }
+    
+    // Supersede старую задачу
+    book.supersede(oldTask.id, newestTask.id);
+    supersededIds.push(oldTask.id);
+    log(`🔗 Recovery: auto-supersede #${oldTask.id} → #${newestTask.id} (обе были active на ${oldTask.symbolCcxt} ${posSide})`);
+  }
+  
+  // Теперь пытаемся вычислить правильный taskEntryAvg для новой задачи
+  // newTaskAvg = (posAvg * posQty - oldTasksAvg * oldTasksQty) / newTaskQty
+  if (accumulatedQty > 0 && posSize > accumulatedQty && posEntryAvg > 0) {
+    const totalValue = posEntryAvg * posSize;
+    const newTaskQty = posSize - accumulatedQty;
+    const newTaskValue = totalValue - accumulatedValue;
+    const calculatedNewAvg = newTaskValue / newTaskQty;
+    
+    // Санитарная проверка: цена должна быть разумной (±50% от средней позиции)
+    if (calculatedNewAvg > posEntryAvg * 0.5 && calculatedNewAvg < posEntryAvg * 1.5) {
+      const currentAvg = newestTask.taskEntryAvg || 0;
+      const diff = Math.abs(currentAvg - calculatedNewAvg) / Math.max(calculatedNewAvg, 1e-12);
+      
+      // Если отличается значительно — обновляем
+      if (diff > 0.005 || currentAvg <= 0) {
+        book.setTaskEntry(newestTask, calculatedNewAvg, newTaskQty);
+        log(`🔧 Recovery: пересчитан taskEntryAvg для #${newestTask.id}: ${currentAvg.toFixed(4)} → ${calculatedNewAvg.toFixed(4)} (из математики позиции)`);
+      }
+    }
+  }
+  
+  return supersededIds;
+}
+
 async function ensureBracketsForTask(
   ex: BinanceFutures,
   book: TaskBook,
@@ -631,6 +719,16 @@ export function startTaskRecoveryLoop(
         // 1) Если есть позиция — обеспечиваем SL/TP для связанной задачи
         if (pos) {
           emptySinceBySymbol.delete(symbol);
+          
+          const posSize = Math.abs(pos.contracts ?? 0);
+          const entryAvg = Number(pos.entryPrice ?? 0);
+          
+          // ✅ НОВОЕ: Сначала автоматически supersede старые tasks если их несколько active
+          const supersededIds = autoSupersedeOlderTasks(book, ts, pos.side, entryAvg, posSize, log);
+          if (supersededIds.length > 0) {
+            console.log(`[AUTO-SUPERSEDE] ${symbol}: superseded ${supersededIds.length} older tasks: ${supersededIds.join(', ')}`);
+          }
+          
           const task = pickTaskForSymbol(ts, pos.side);
           
           // 🔍 ДИАГНОСТИКА: какая задача выбрана
@@ -639,8 +737,7 @@ export function startTaskRecoveryLoop(
           console.log(`  → Выбрана задача #${task?.id || 'NONE'}`);
           
           if (task) {
-            const posSize = Math.abs(pos.contracts ?? 0);
-            const entryAvg = Number(pos.entryPrice ?? 0);
+            // posSize и entryAvg уже объявлены выше
             
             // ✅ АВТОФИКС: Пересчитываем taskEntryAvg из entryPrices или entry ордеров
             let entryPrices = task.entryPrices || [];
@@ -669,8 +766,7 @@ export function startTaskRecoveryLoop(
                 
                 // Сохраняем найденные цены в task
                 if (entryPrices.length > 0) {
-                  task.entryPrices = entryPrices;
-                  book.save(); // Персистим
+                  book.setEntryPrices(task, entryPrices);
                   console.log(`[AUTOFIX] Loaded entryPrices from exchange for #${task.id}: ${entryPrices.join(', ')}`);
                 }
               } catch (e: any) {
