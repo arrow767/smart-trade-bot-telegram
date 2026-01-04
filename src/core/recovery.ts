@@ -258,6 +258,17 @@ async function ensureBracketsForTask(
     }
   }
   
+  // ✅ АВТОФИКС: Если taskEntryAvg был исправлен — принудительно пересчитываем TP
+  // Проверяем соответствие текущего taskEntryAvg и entryPrices
+  if (task.entryPrices && task.entryPrices.length > 0 && hasTP) {
+    const correctEntryAvg = task.entryPrices.reduce((a, b) => a + b, 0) / task.entryPrices.length;
+    const diff = Math.abs(tpEntryAvg - correctEntryAvg) / Math.max(correctEntryAvg, 1e-12);
+    if (diff > 0.01) {
+      needRecalcTP = true;
+      console.log(`[AUTOFIX] Task #${task.id}: taskEntryAvg mismatch, forcing TP recalc (${tpEntryAvg} vs ${correctEntryAvg})`);
+    }
+  }
+  
   // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть И не нужен пересчёт
   if (hasSL && !needRecalcSL && hasTP && !needRecalcTP) {
     return;
@@ -619,12 +630,26 @@ export function startTaskRecoveryLoop(
           console.log(`  → Выбрана задача #${task?.id || 'NONE'}`);
           
           if (task) {
-            // ✅ НОВОЕ: Инициализируем taskEntryAvg/taskEntryQty для старых задач
-            // Если поля не заполнены - берём данные с биржи (для совместимости со старыми задачами)
             const posSize = Math.abs(pos.contracts ?? 0);
             const entryAvg = Number(pos.entryPrice ?? 0);
-            if ((!task.taskEntryAvg || task.taskEntryAvg <= 0) && entryAvg > 0 && posSize > 0) {
-              // ✅ КРИТИЧНО: Используем объём ЭТОЙ task, не всей позиции!
+            
+            // ✅ АВТОФИКС: Пересчитываем taskEntryAvg из entryPrices если они есть
+            // Это исправляет старые задачи с неправильным taskEntryAvg
+            if (task.entryPrices && task.entryPrices.length > 0) {
+              const correctEntryAvg = task.entryPrices.reduce((a, b) => a + b, 0) / task.entryPrices.length;
+              const currentAvg = task.taskEntryAvg || 0;
+              
+              // Если текущий avg отличается от правильного более чем на 1% — исправляем
+              const diff = Math.abs(currentAvg - correctEntryAvg) / Math.max(correctEntryAvg, 1e-12);
+              if (diff > 0.01 || currentAvg <= 0) {
+                const taskQty = task.totalUsd && task.totalUsd > 0 && correctEntryAvg > 0
+                  ? Math.min(posSize, task.totalUsd / correctEntryAvg)
+                  : posSize;
+                book.setTaskEntry(task, correctEntryAvg, taskQty);
+                log(`🔧 Recovery: АВТОФИКС taskEntryAvg для #${task.id} ${symbol}: ${currentAvg.toFixed(2)} → ${correctEntryAvg.toFixed(2)} (из entryPrices)`);
+              }
+            } else if ((!task.taskEntryAvg || task.taskEntryAvg <= 0) && entryAvg > 0 && posSize > 0) {
+              // Fallback: если нет entryPrices, используем среднюю позиции (для очень старых задач)
               const taskQty = task.totalUsd && task.totalUsd > 0 && entryAvg > 0
                 ? Math.min(posSize, task.totalUsd / entryAvg)
                 : posSize;
