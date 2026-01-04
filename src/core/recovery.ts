@@ -121,9 +121,14 @@ async function ensureBracketsForTask(
     book.set(task, "live");
     // Обновляем taskEntry если ещё не было
     if (!task.taskEntryAvg || !task.taskEntryQty) {
-      book.setTaskEntry(task, entryAvg, actualPosSize);
+      // ✅ КРИТИЧНО: Используем объём ЭТОЙ task, не всей позиции!
+      // task.totalUsd = планируемый объём задачи (сколько хотели набрать)
+      const taskQty = task.totalUsd && task.totalUsd > 0 && entryAvg > 0
+        ? Math.min(actualPosSize, task.totalUsd / entryAvg)  // Не больше чем вся позиция
+        : actualPosSize;  // Fallback: вся позиция если нет данных
+      book.setTaskEntry(task, entryAvg, taskQty);
     }
-    log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (pos=${fmtQty5(actualPosSize)} @ ${entryAvg})`);
+    log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (taskQty=${fmtQty5(task.taskEntryQty || 0)} @ ${entryAvg})`);
   }
 
   // ✅ НОВОЕ: Если noPreset=true — не ставим SL/TP
@@ -585,8 +590,12 @@ export function startTaskRecoveryLoop(
             const posSize = Math.abs(pos.contracts ?? 0);
             const entryAvg = Number(pos.entryPrice ?? 0);
             if ((!task.taskEntryAvg || task.taskEntryAvg <= 0) && entryAvg > 0 && posSize > 0) {
-              book.setTaskEntry(task, entryAvg, posSize);
-              log(`🔄 Recovery: инициализированы entry данные для #${task.id} ${symbol}: avg=${entryAvg}, qty=${fmtQty5(posSize)}`);
+              // ✅ КРИТИЧНО: Используем объём ЭТОЙ task, не всей позиции!
+              const taskQty = task.totalUsd && task.totalUsd > 0 && entryAvg > 0
+                ? Math.min(posSize, task.totalUsd / entryAvg)
+                : posSize;
+              book.setTaskEntry(task, entryAvg, taskQty);
+              log(`🔄 Recovery: инициализированы entry данные для #${task.id} ${symbol}: avg=${entryAvg}, taskQty=${fmtQty5(taskQty)}`);
             }
             
             try {
