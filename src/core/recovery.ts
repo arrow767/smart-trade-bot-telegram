@@ -165,8 +165,11 @@ async function ensureBracketsForTask(
   const slEntryQty = task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize;
   
   // ✅ НОВОЕ: Проверяем нужно ли пересчитать SL (если он на неправильном расстоянии)
+  // Риск берём напрямую из task без factor (для цепочки каждая task = отдельная сделка)
+  const baseRiskForSL = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
+  
   let needRecalcSL = false;
-  if (hasSL && task.taskEntryAvg && task.taskEntryAvg > 0) {
+  if (hasSL) {
     // Найти текущую цену SL
     const currentSLOrder = all.find((o: any) => {
       const t = String(o?.type || o?.orderType || "").toUpperCase();
@@ -177,11 +180,8 @@ async function ensureBracketsForTask(
     const currentSLPrice = Number(currentSLOrder?.stopPrice || currentSLOrder?.triggerPrice || currentSLOrder?.price || 0);
     
     if (currentSLPrice > 0) {
-      // Рассчитать правильную цену SL
-      const taskUsdForCheck = slEntryQty * slEntryAvg;
-      const baseRiskForCheck = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
-      const factorForCheck = Math.min(1, taskUsdForCheck / Math.max(1, task.totalUsd ?? taskUsdForCheck));
-      const correctSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRiskForCheck * factorForCheck);
+      // ✅ Рассчитать правильную цену SL от объёма ЭТОЙ task (без factor!)
+      const correctSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRiskForSL);
       
       // Если отличается более чем на 1% — пересчитываем
       const diff = Math.abs(currentSLPrice - correctSL) / Math.max(correctSL, 1e-12);
@@ -243,17 +243,6 @@ async function ensureBracketsForTask(
   if (hasSL && !needRecalcSL && hasTP && !needRecalcTP) {
     return;
   }
-  
-  const positionUsd = actualPosSize * entryAvg;
-  const taskUsd = slEntryQty * slEntryAvg;
-  const totalPlannedUsd = task.totalUsd ?? taskUsd;
-  const baseRisk =
-    (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
-      ? task.riskUsd
-      : (Number.isFinite(preset.trade_risk) && preset.trade_risk > 0 ? preset.trade_risk : 0);
-  // ✅ factor от объёма ЭТОЙ task
-  const factor = Math.min(1, taskUsd / Math.max(1, totalPlannedUsd));
-  const effectiveRiskUsd = baseRisk * factor;
 
   if (!hasSL || needRecalcSL) {
     // ✅ КРИТИЧНО: Ещё раз проверяем что позиция существует перед размещением SL
@@ -268,8 +257,8 @@ async function ensureBracketsForTask(
       return;
     }
     
-    // ✅ SL: от средней и объёма ЭТОЙ task
-    const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, effectiveRiskUsd);
+    // ✅ SL: от средней и объёма ЭТОЙ task (без factor!)
+    const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRiskForSL);
     const precSL = Number(ex.priceToPrecision(symbol, desiredSL));
     const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
     const safeSL = Number(ex.priceToPrecision(symbol, safeSL0));

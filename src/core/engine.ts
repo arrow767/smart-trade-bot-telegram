@@ -2030,21 +2030,18 @@ export async function runCommand(
           const slEntryAvg = currentTask?.taskEntryAvg || entryAvg;
           const slEntryQty = currentTask?.taskEntryQty || posSize;
 
-          const totalPlannedUsd = task.totalUsd ?? positionUsd;
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
+          // ✅ УПРОЩЕНО: Риск берём напрямую из task (без factor!)
+          // Для цепочки каждая task = отдельная сделка со своим риском
           const baseRisk =
             (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
               ? task.riskUsd
               : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
-          // ✅ factor для риска: относительно объёма ЭТОЙ task, не всей позиции
-          const taskPlannedUsd = task.totalUsd ?? (slEntryQty * slEntryAvg);
-          const factor = RISK_LOCK_AFTER_FILL && entriesLeft === 0 ? 1 : Math.min(1, (slEntryQty * slEntryAvg) / Math.max(1, taskPlannedUsd));
-          const effectiveRiskUsd = baseRisk * factor;
 
           // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
           if (!noPreset) {
-            // ✅ SL: рассчитываем от средней и объёма ЭТОЙ task
-            const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, effectiveRiskUsd);
+            // ✅ SL: рассчитываем от средней и объёма ЭТОЙ task (без factor!)
+            const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRisk);
             const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
             const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
             const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
