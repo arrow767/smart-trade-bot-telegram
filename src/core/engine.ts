@@ -11,7 +11,7 @@
 } from "../config/trading_config";
 import { normalizeTickerToUsdt } from "./SymbolResolver";
 import { BinanceFutures } from "../exch/BinanceFutures";
-import { planTargets } from "./Planner";
+import { planTargets, planTPFromSL } from "./Planner";
 import { splitQtyToStep, mergeDustToPrev } from "../utils/math";
 import {
   UIMode,

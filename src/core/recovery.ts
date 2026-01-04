@@ -5,7 +5,7 @@ import { DEFAULT_PRESET } from "./types";
 import { getPreset } from "../config/trading_config";
 import { cancelOnlySL, cancelBracketOnly } from "./OrderUtils";
 import { adjustStopForMark, calcDesiredSLByRiskUsd, fmtQty5 } from "./TradingUtils";
-import { planTargets } from "./Planner";
+import { planTargets, planTPFromSL } from "./Planner";
 import { mergeDustToPrev, splitQtyToStep } from "../utils/math";
 
 function hasClosePositionSL(orders: any[]): boolean {
@@ -301,35 +301,30 @@ async function ensureBracketsForTask(
   let needRecalcTP = false;
   let correctTPPrices: number[] = [];
   
-  // Рассчитываем правильные цены TP от средней ЭТОЙ task и ЗАПЛАНИРОВАННОГО объёма
+  // ✅ ИСПРАВЛЕНО: TP рассчитываются от РЕАЛЬНОГО расстояния до SL
+  // Это гарантирует что TP = 1:3, 1:5, 1:7 от SL независимо от формулы SL
   const tpEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
-  const tpRiskUsd = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
   
-  // ✅ КРИТИЧНО: positionUsd = task.totalUsd (ЗАПЛАНИРОВАННЫЙ объём, не текущий!)
-  // r = riskUsd / totalUsd — это фиксируется при создании task
-  const taskTotalUsd = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (actualPosSize * entryAvg);
-  const planningForPrices = { ...preset, trade_risk: tpRiskUsd } as any;
+  // Рассчитываем SL для TP (используем ту же формулу что и для реального SL)
+  const desiredSLForTP = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRiskForSL);
+  const slDistance = Math.abs(tpEntryAvg - desiredSLForTP);
   
   // 🔍 ДИАГНОСТИКА: выводим все значения для отладки
-  const rPercent = tpRiskUsd / taskTotalUsd * 100;
   console.log(`[DIAG] Task #${task.id} ${symbol}:`);
   console.log(`  side=${side}, taskEntryAvg=${tpEntryAvg}`);
-  console.log(`  riskUsd=$${tpRiskUsd}, totalUsd=$${taskTotalUsd.toFixed(2)}, r=${rPercent.toFixed(2)}%`);
+  console.log(`  riskUsd=$${baseRiskForSL}, slEntryQty=${fmtQty5(slEntryQty)}`);
   console.log(`  task.totalUsd=${task.totalUsd}, task.taskEntryAvg=${task.taskEntryAvg}`);
   console.log(`  entryAvg(exchange)=${entryAvg}, actualPosSize=${fmtQty5(actualPosSize)}`);
   console.log(`  preset.take_profit=${JSON.stringify(preset.take_profit)}`);
   console.log(`  hasSL=${hasSL}, hasTP=${hasTP}, needRecalcSL=${needRecalcSL}`);
+  console.log(`  desiredSL=${desiredSLForTP.toFixed(4)}, slDistance=${slDistance.toFixed(4)}`);
   
-  const tpResult = planTargets({ 
-    side, 
-    entryPrice: tpEntryAvg,  // ✅ Цена от средней ЭТОЙ task
-    positionUsd: taskTotalUsd,  // ✅ ЗАПЛАНИРОВАННЫЙ объём task (для расстояния!)
-    preset: planningForPrices 
-  });
-  correctTPPrices = tpResult.tpPrices.map(p => Number(ex.priceToPrecision(symbol, p)));
+  // ✅ ИСПРАВЛЕНО: Используем planTPFromSL для расчёта TP от реального SL
+  const rawTPPrices = planTPFromSL(side, tpEntryAvg, desiredSLForTP, preset.take_profit);
+  correctTPPrices = rawTPPrices.map(p => Number(ex.priceToPrecision(symbol, p)));
   
   console.log(`  calculated TP prices: ${correctTPPrices.join(', ')}`);
-  console.log(`  calculated SL: ${tpResult.stopPrice}`);
+  console.log(`  calculated SL: ${desiredSLForTP.toFixed(4)}`);
   console.log(`  existing TP prices: ${existingTPs.map((o: any) => o?.price || o?.info?.price).join(', ')}`);
   
   if (hasTP && correctTPPrices.length > 0) {
