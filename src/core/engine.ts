@@ -2169,6 +2169,12 @@ export async function runCommand(
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
                 const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: taskPositionUsd, preset: planningPreset2 });
 
+                // 🔍 ДИАГНОСТИКА TP
+                const rPercent = baseRisk / taskPositionUsd * 100;
+                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, posUsd=$${taskPositionUsd.toFixed(2)}, risk=$${baseRisk}, r=${rPercent.toFixed(2)}%`);
+                console.log(`[TP CALC] TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`);
+                console.log(`[TP CALC] take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`);
+
                 let tpQtys = splitQtyToStep(actualPosSizeForTP, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
