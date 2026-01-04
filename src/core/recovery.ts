@@ -143,40 +143,9 @@ async function ensureBracketsForTask(
 
   const hasSL = hasClosePositionSL(all);
   
-  // ✅ УЛУЧШЕНО: Проверяем TP более детально — сумма qty должна соответствовать позиции
-  let hasTP = hasAnyReduceOnlyTP(all);
-  let needRecalcTP = false;
-  
-  if (hasTP) {
-    // Проверяем что сумма TP ≈ размеру позиции
-    const tpOrders = open.filter((o: any) => {
-      const t = String(o?.type || "").toUpperCase();
-      const isLimit = t.includes("LIMIT") && !t.includes("STOP");
-      const ro = o?.reduceOnly === true || o?.reduceOnly === "true" || 
-                 o?.info?.reduceOnly === true || o?.info?.reduceOnly === "true";
-      const cp = o?.closePosition === true || o?.closePosition === "true" || 
-                 o?.info?.closePosition === true || o?.info?.closePosition === "true";
-      return isLimit && ro && !cp;
-    });
-    
-    const totalTPQty = tpOrders.reduce((sum: number, o: any) => {
-      return sum + (Number(o.amount ?? o.info?.origQty ?? 0) || 0);
-    }, 0);
-    
-    // Если сумма TP отличается от позиции более чем на 10% — пересчитываем
-    const diff = Math.abs(totalTPQty - actualPosSize) / Math.max(actualPosSize, 1e-12);
-    if (diff > 0.1) {
-      needRecalcTP = true;
-      // Снимаем старые TP
-      for (const o of tpOrders) {
-        if (o.id) {
-          try { await ex.cancelOrder(symbol, o.id); } catch {}
-        }
-      }
-      hasTP = false;
-      log(`🔄 Recovery: TP пересчитываются для #${task.id} ${symbol} (diff=${(diff * 100).toFixed(1)}%)`);
-    }
-  }
+  // ✅ ВАЖНО: Если есть хотя бы ОДНА TP лимитка — НЕ трогаем их
+  // Это предотвращает бесконечное пересоздание TP после частичного исполнения
+  const hasTP = hasAnyReduceOnlyTP(all);
 
   const preset = await getPreset(task.presetName || DEFAULT_PRESET);
   const side = task.side || pos.side;
