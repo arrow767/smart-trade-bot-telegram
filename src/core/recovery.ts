@@ -217,6 +217,15 @@ async function ensureBracketsForTask(
   // НЕ вся позиция! Иначе расстояние будет меньше чем нужно
   const taskPositionUsd = tpEntryQty * tpEntryAvg;
   const planningForPrices = { ...preset, trade_risk: tpRiskUsd } as any;
+  
+  // 🔍 ДИАГНОСТИКА: выводим все значения для отладки
+  console.log(`[DIAG] Task #${task.id} ${symbol}:`);
+  console.log(`  side=${side}, taskEntryAvg=${tpEntryAvg}, taskEntryQty=${fmtQty5(tpEntryQty)}`);
+  console.log(`  riskUsd=${tpRiskUsd}, taskPositionUsd=${taskPositionUsd.toFixed(2)}`);
+  console.log(`  task.taskEntryAvg=${task.taskEntryAvg}, task.taskEntryQty=${task.taskEntryQty}`);
+  console.log(`  entryAvg(exchange)=${entryAvg}, actualPosSize=${fmtQty5(actualPosSize)}`);
+  console.log(`  preset.take_profit=${JSON.stringify(preset.take_profit)}`);
+  
   const tpResult = planTargets({ 
     side, 
     entryPrice: tpEntryAvg,  // ✅ Цена от средней ЭТОЙ task
@@ -224,6 +233,9 @@ async function ensureBracketsForTask(
     preset: planningForPrices 
   });
   correctTPPrices = tpResult.tpPrices.map(p => Number(ex.priceToPrecision(symbol, p)));
+  
+  console.log(`  calculated TP prices: ${correctTPPrices.join(', ')}`);
+  console.log(`  calculated SL: ${tpResult.stopPrice}`);
   
   if (hasTP && correctTPPrices.length > 0) {
     // Проверяем соответствие цен существующих TP
@@ -584,6 +596,12 @@ export function startTaskRecoveryLoop(
         if (pos) {
           emptySinceBySymbol.delete(symbol);
           const task = pickTaskForSymbol(ts, pos.side);
+          
+          // 🔍 ДИАГНОСТИКА: какая задача выбрана
+          console.log(`[DIAG PICK] Symbol ${symbol}: ${ts.length} tasks, pos.side=${pos.side}, pos.entryPrice=${pos.entryPrice}`);
+          ts.forEach(t => console.log(`  - Task #${t.id} side=${t.side} status=${t.status} supersededBy=${t.supersededBy || 'none'} taskEntryAvg=${t.taskEntryAvg || 'none'} totalUsd=${t.totalUsd || 'none'}`));
+          console.log(`  → Выбрана задача #${task?.id || 'NONE'}`);
+          
           if (task) {
             // ✅ НОВОЕ: Инициализируем taskEntryAvg/taskEntryQty для старых задач
             // Если поля не заполнены - берём данные с биржи (для совместимости со старыми задачами)
