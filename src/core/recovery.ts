@@ -203,16 +203,19 @@ async function ensureBracketsForTask(
   let needRecalcTP = false;
   let correctTPPrices: number[] = [];
   
-  // Рассчитываем правильные цены TP от средней ЭТОЙ task
+  // Рассчитываем правильные цены TP от средней и объёма ЭТОЙ task
   const tpEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
+  const tpEntryQty = task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize;
   const tpRiskUsd = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
   
-  // Для расчёта цен TP используем среднюю task, но объём будет вся позиция
+  // ✅ КРИТИЧНО: positionUsd = объём ЭТОЙ task (для расчёта РАССТОЯНИЯ TP)
+  // НЕ вся позиция! Иначе расстояние будет меньше чем нужно
+  const taskPositionUsd = tpEntryQty * tpEntryAvg;
   const planningForPrices = { ...preset, trade_risk: tpRiskUsd } as any;
   const tpResult = planTargets({ 
     side, 
-    entryPrice: tpEntryAvg,  // ✅ Цены от средней ЭТОЙ task
-    positionUsd: actualPosSize * tpEntryAvg,  // Для расчёта ratios
+    entryPrice: tpEntryAvg,  // ✅ Цена от средней ЭТОЙ task
+    positionUsd: taskPositionUsd,  // ✅ Объём ЭТОЙ task (для расстояния!)
     preset: planningForPrices 
   });
   correctTPPrices = tpResult.tpPrices.map(p => Number(ex.priceToPrecision(symbol, p)));

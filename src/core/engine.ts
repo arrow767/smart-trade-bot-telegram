@@ -241,10 +241,11 @@ async function handleTaskChaining(
       log(`🔗 Цепочка: новый SL @ ${safeSL} (от ${newTaskEntryAvg}, risk=$${baseRisk}, qty=${fmtQty5(newTaskEntryQty)})`);
     }
     
-    // ✅ КЛЮЧЕВОЕ: TP рассчитываем на ВЕСЬ объём позиции с риском из задачи
-    const positionUsd = totalPositionQty * newTaskEntryAvg;
+    // ✅ КЛЮЧЕВОЕ: Для ЦЕН TP используем объём ЭТОЙ task (для расстояния)
+    // Для ОБЪЁМА TP ордеров используем totalPositionQty (вся позиция)
+    const taskPositionUsd = newTaskEntryQty * newTaskEntryAvg; // Объём ЭТОЙ task для расстояния
     const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd, preset: planningPreset });
+    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd: taskPositionUsd, preset: planningPreset });
     
     let tpQtys = splitQtyToStep(totalPositionQty, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
@@ -2106,15 +2107,17 @@ export async function runCommand(
                   // Позиция закрыта - не выставляем TP
                   tpsPlaced = true; // Помечаем чтобы не пытаться снова
                 } else {
-                  // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи
+                  // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи для КОЛИЧЕСТВА TP
                 const actualPosSizeForTP = actualPosSize;
-                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю ЭТОЙ task
-                // Но ОБЪЁМ TP = вся позиция
-                const tpEntryAvg = slEntryAvg; // Средняя ЭТОЙ task для расстояния TP
-                const actualPositionUsd = actualPosSizeForTP * tpEntryAvg;
+                
+                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю и объём ЭТОЙ task
+                // Расстояние TP = risk / taskPositionUsd, где taskPositionUsd = объём ЭТОЙ task
+                const tpEntryAvg = slEntryAvg; // Средняя ЭТОЙ task
+                const tpEntryQty = slEntryQty; // Объём ЭТОЙ task
+                const taskPositionUsd = tpEntryQty * tpEntryAvg; // Для расчёта РАССТОЯНИЯ (не объёма!)
                 
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: actualPositionUsd, preset: planningPreset2 });
+                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: taskPositionUsd, preset: planningPreset2 });
 
                 let tpQtys = splitQtyToStep(actualPosSizeForTP, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
