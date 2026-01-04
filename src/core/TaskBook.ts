@@ -90,6 +90,8 @@ export class TaskBook {
           noPreset: o.noPreset === true || o.noPreset === "true",
           // ✅ НОВОЕ: цены входов
           entryPrices: Array.isArray(o.entryPrices) ? o.entryPrices.map(Number).filter((n: number) => n > 0) : undefined,
+          // ✅ НОВОЕ: количество заполненных TP
+          filledTpCount: Number(o.filledTpCount || 0) || undefined,
         };
         this.tasks.set(t.id, t);
       }
@@ -199,6 +201,15 @@ export class TaskBook {
 
   requestCancelAll() {
     for (const t of this.tasks.values()) t.cancelRequested = true;
+    this.save();
+  }
+  
+  /**
+   * ✅ НОВОЕ: Инкрементирует счётчик заполненных TP
+   */
+  incrementFilledTp(t: Task, count: number = 1) {
+    t.filledTpCount = (t.filledTpCount || 0) + count;
+    t.updatedAt = new Date();
     this.save();
   }
 

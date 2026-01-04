@@ -1381,17 +1381,18 @@ export async function runCommand(
             // ✅ КЛЮЧЕВОЕ: Для SL используем данные ЭТОЙ task (важно для цепочки)
             const currentTask = book.get(task.id);
             const slEntryAvg = currentTask?.taskEntryAvg || entryAvg;
-            const slEntryQty = currentTask?.taskEntryQty || posSize;
+            // ✅ КРИТИЧНО: Используем ПЛАНИРУЕМЫЙ объём task (totalUsd), а не текущий!
+            const plannedQty = task.totalUsd && task.totalUsd > 0 && slEntryAvg > 0
+              ? task.totalUsd / slEntryAvg
+              : (currentTask?.taskEntryQty || posSize);
+            const slEntryQty = plannedQty;
 
-            const totalUsd = task.totalUsd ?? positionUsd;
             const baseRisk =
               (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
                 ? task.riskUsd
                 : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : preset.trade_risk);
-            // ✅ factor от объёма ЭТОЙ task
-            const taskPlannedUsd = task.totalUsd ?? (slEntryQty * slEntryAvg);
-            const factor = RISK_LOCK_AFTER_FILL ? 1 : Math.min(1, (slEntryQty * slEntryAvg) / Math.max(1, taskPlannedUsd));
-            const effectiveRiskUsd = baseRisk * factor;
+            // ✅ УПРОЩЕНО: Используем baseRisk напрямую (factor убран)
+            const effectiveRiskUsd = baseRisk;
 
             // ✅ НОВОЕ: Устанавливаем SL и TP только если не отключены пресеты
             if (!noPreset) {
@@ -2067,7 +2068,12 @@ export async function runCommand(
           // Это важно для цепочки задач - SL рассчитывается от объёма/риска текущей task
           const currentTask = book.get(task.id);
           const slEntryAvg = currentTask?.taskEntryAvg || entryAvg;
-          const slEntryQty = currentTask?.taskEntryQty || posSize;
+          // ✅ КРИТИЧНО: Используем ПЛАНИРУЕМЫЙ объём task (totalUsd), а не текущий!
+          // Это нужно чтобы SL сразу ставился на правильное расстояние даже при частичном исполнении
+          const plannedQty = task.totalUsd && task.totalUsd > 0 && slEntryAvg > 0
+            ? task.totalUsd / slEntryAvg
+            : (currentTask?.taskEntryQty || posSize);
+          const slEntryQty = plannedQty;
 
           const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);
           // ✅ УПРОЩЕНО: Риск берём напрямую из task (без factor!)

@@ -167,7 +167,12 @@ async function ensureBracketsForTask(
 
   // ✅ КЛЮЧЕВОЕ: Для SL используем данные ЭТОЙ task, а не всей позиции (важно для цепочки)
   const slEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
-  const slEntryQty = task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize;
+  // ✅ КРИТИЧНО: Используем ПЛАНИРУЕМЫЙ объём task (totalUsd), а не текущий!
+  // Это нужно чтобы SL сразу ставился на правильное расстояние даже при частичном исполнении
+  const plannedQty = task.totalUsd && task.totalUsd > 0 && slEntryAvg > 0
+    ? task.totalUsd / slEntryAvg
+    : (task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize);
+  const slEntryQty = plannedQty;
   
   // ✅ НОВОЕ: Проверяем нужно ли пересчитать SL (если он на неправильном расстоянии)
   // Риск берём напрямую из task без factor (для цепочки каждая task = отдельная сделка)
@@ -355,9 +360,13 @@ async function ensureBracketsForTask(
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
     tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbol, q)));
 
+    // ✅ НОВОЕ: Пропускаем уже заполненные (съеденные) TP
+    const filledTpCount = task.filledTpCount || 0;
+    const startIndex = filledTpCount; // Начинаем с индекса после заполненных
+    
     let placed = 0;
     let errors: string[] = [];
-    for (let i = 0; i < correctTPPrices.length; i++) {
+    for (let i = startIndex; i < correctTPPrices.length; i++) {
       const q = tpQtys[i];
       if (!(q > 0) || q < filters.minQty) continue;
       const p = correctTPPrices[i];

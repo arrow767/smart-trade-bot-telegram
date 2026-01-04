@@ -112,6 +112,12 @@ export type Task = {
    * ✅ НОВОЕ: Цены входных ордеров (для отображения в tasks/info)
    */
   entryPrices?: number[];
+  
+  /**
+   * ✅ НОВОЕ: Количество заполненных (съеденных) TP.
+   * При восстановлении TP пропускаем первые N (где N = filledTpCount).
+   */
+  filledTpCount?: number;
 };
 
 export const DEFAULT_PRESET = "4h";
