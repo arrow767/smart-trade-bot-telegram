@@ -263,16 +263,21 @@ async function ensureBracketsForTask(
     return;
   }
 
+  console.log(`[DIAG SL] hasSL=${hasSL}, needRecalcSL=${needRecalcSL}, will place SL: ${!hasSL || needRecalcSL}`);
+  
   if (!hasSL || needRecalcSL) {
     // ✅ КРИТИЧНО: Ещё раз проверяем что позиция существует перед размещением SL
     try {
       const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
+      console.log(`[DIAG SL] checkPos=${checkPos}, minQty=${minQty}`);
       if (checkPos < minQty * 0.5) {
         // Позиция закрыта — не ставим SL
+        console.log(`[DIAG SL] Position too small, skipping SL`);
         return;
       }
-    } catch {
+    } catch (e: any) {
       // При ошибке — не ставим SL чтобы избежать -4509
+      console.log(`[DIAG SL] Error fetching position: ${e?.message}`);
       return;
     }
     
@@ -281,11 +286,17 @@ async function ensureBracketsForTask(
     const precSL = Number(ex.priceToPrecision(symbol, desiredSL));
     const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
     const safeSL = Number(ex.priceToPrecision(symbol, safeSL0));
+    
+    console.log(`[DIAG SL] desiredSL=${desiredSL}, safeSL=${safeSL}, mark=${mark}`);
+    console.log(`[DIAG SL] slEntryAvg=${slEntryAvg}, slEntryQty=${slEntryQty}, baseRiskForSL=${baseRiskForSL}`);
+    
     if (Number.isFinite(safeSL) && safeSL > 0) {
       const keep = new Set((task.entryOrderIds || []).map(String));
       await cancelOnlySL(ex, symbol, keep).catch(() => {});
       try {
+        console.log(`[DIAG SL] Placing SL @ ${safeSL}...`);
         const slResult = await ex.createStopMarketClose(symbol, sideExit as any, safeSL);
+        console.log(`[DIAG SL] SL result: ${JSON.stringify(slResult?.id || slResult?.info?.orderId || 'unknown')}`);
         // ✅ ИСПРАВЛЕНО: Не логируем если SL был skipped (уже существует или нет позиции)
         const wasSkipped = slResult?.info?.skipped === true || 
                            String(slResult?.id || "").startsWith("skipped");
@@ -293,6 +304,7 @@ async function ensureBracketsForTask(
           log(`🧯 Recovery: SL выставлен для #${task.id} ${symbol} (${side}) @ ${safeSL}`);
         }
       } catch (slErr: any) {
+        console.log(`[DIAG SL] Error placing SL: ${slErr?.message}`);
         const known = isKnownAlgoError(slErr);
         if (known.ignore) {
           // -4509: нет позиции, -4130: SL уже есть — не спамим
@@ -300,6 +312,8 @@ async function ensureBracketsForTask(
           throw slErr; // Пробрасываем неизвестные ошибки
         }
       }
+    } else {
+      console.log(`[DIAG SL] Invalid safeSL=${safeSL}, skipping`);
     }
   }
 
