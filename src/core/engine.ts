@@ -813,55 +813,64 @@ export async function runCommand(
           }
         }
         
+        // ✅ ИСПРАВЛЕНО: SL/TP показываем ТОЛЬКО для последней (главной) задачи на символе
+        // Последняя = не superseded, с наибольшим ID
+        const activeTasks = tasksForSym.filter(t => 
+          (t.status === "live" || t.status === "filled") && !t.supersededBy
+        );
+        const latestTaskLong = activeTasks.filter(t => t.side === "long").sort((a, b) => b.id - a.id)[0];
+        const latestTaskShort = activeTasks.filter(t => t.side === "short").sort((a, b) => b.id - a.id)[0];
+        
         // SL/TP из Algo Orders
         for (const ao of algoOrders) {
           const orderType = String(ao.orderType || ao.type || "").toUpperCase();
           const triggerPrice = Number(ao.triggerPrice || ao.stopPrice || 0);
-          const side = String(ao.side || "").toLowerCase();
+          const aoSide = String(ao.side || "").toLowerCase();
           
-          // Определяем какой задаче принадлежит этот ордер (по символу и направлению)
-          for (const task of tasksForSym) {
-            if (task.status !== "live" && task.status !== "filled") continue;
-            
-            // SL: STOP_MARKET с противоположной стороной
-            if (orderType.includes("STOP") && !orderType.includes("TAKE_PROFIT")) {
-              const isSlForLong = task.side === "long" && side === "sell";
-              const isSlForShort = task.side === "short" && side === "buy";
-              if ((isSlForLong || isSlForShort) && triggerPrice > 0) {
-                slPriceMap.set(task.id, triggerPrice);
-              }
+          // SL: STOP_MARKET с противоположной стороной — ТОЛЬКО для последней задачи
+          if (orderType.includes("STOP") && !orderType.includes("TAKE_PROFIT") && triggerPrice > 0) {
+            if (latestTaskLong && aoSide === "sell") {
+              slPriceMap.set(latestTaskLong.id, triggerPrice);
             }
-            
-            // TP: TAKE_PROFIT_MARKET или reduceOnly LIMIT
-            if (orderType.includes("TAKE_PROFIT")) {
-              const isTpForLong = task.side === "long" && side === "sell";
-              const isTpForShort = task.side === "short" && side === "buy";
-              if ((isTpForLong || isTpForShort) && triggerPrice > 0) {
-                const existing = tpPricesMap.get(task.id) || [];
-                existing.push(triggerPrice);
-                tpPricesMap.set(task.id, existing);
-              }
+            if (latestTaskShort && aoSide === "buy") {
+              slPriceMap.set(latestTaskShort.id, triggerPrice);
+            }
+          }
+          
+          // TP: TAKE_PROFIT_MARKET — ТОЛЬКО для последней задачи
+          if (orderType.includes("TAKE_PROFIT") && triggerPrice > 0) {
+            if (latestTaskLong && aoSide === "sell") {
+              const existing = tpPricesMap.get(latestTaskLong.id) || [];
+              existing.push(triggerPrice);
+              tpPricesMap.set(latestTaskLong.id, existing);
+            }
+            if (latestTaskShort && aoSide === "buy") {
+              const existing = tpPricesMap.get(latestTaskShort.id) || [];
+              existing.push(triggerPrice);
+              tpPricesMap.set(latestTaskShort.id, existing);
             }
           }
         }
         
-        // Также проверяем reduceOnly LIMIT ордера как TP
+        // Также проверяем reduceOnly LIMIT ордера как TP — ТОЛЬКО для последней задачи
         for (const o of open) {
           const isReduceOnly = o.info?.reduceOnly === true || o.info?.reduceOnly === "true";
           if (!isReduceOnly) continue;
           const price = Number(o.price ?? o.info?.price ?? 0);
-          const side = String(o.side || "").toLowerCase();
+          const oSide = String(o.side || "").toLowerCase();
           
-          for (const task of tasksForSym) {
-            if (task.status !== "live" && task.status !== "filled") continue;
-            const isTpForLong = task.side === "long" && side === "sell";
-            const isTpForShort = task.side === "short" && side === "buy";
-            if ((isTpForLong || isTpForShort) && price > 0) {
-              const existing = tpPricesMap.get(task.id) || [];
-              if (!existing.includes(price)) {
-                existing.push(price);
-                tpPricesMap.set(task.id, existing);
-              }
+          if (latestTaskLong && oSide === "sell" && price > 0) {
+            const existing = tpPricesMap.get(latestTaskLong.id) || [];
+            if (!existing.includes(price)) {
+              existing.push(price);
+              tpPricesMap.set(latestTaskLong.id, existing);
+            }
+          }
+          if (latestTaskShort && oSide === "buy" && price > 0) {
+            const existing = tpPricesMap.get(latestTaskShort.id) || [];
+            if (!existing.includes(price)) {
+              existing.push(price);
+              tpPricesMap.set(latestTaskShort.id, existing);
             }
           }
         }
