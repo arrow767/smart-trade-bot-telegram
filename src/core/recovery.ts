@@ -633,10 +633,45 @@ export function startTaskRecoveryLoop(
             const posSize = Math.abs(pos.contracts ?? 0);
             const entryAvg = Number(pos.entryPrice ?? 0);
             
-            // ✅ АВТОФИКС: Пересчитываем taskEntryAvg из entryPrices если они есть
-            // Это исправляет старые задачи с неправильным taskEntryAvg
-            if (task.entryPrices && task.entryPrices.length > 0) {
-              const correctEntryAvg = task.entryPrices.reduce((a, b) => a + b, 0) / task.entryPrices.length;
+            // ✅ АВТОФИКС: Пересчитываем taskEntryAvg из entryPrices или entry ордеров
+            let entryPrices = task.entryPrices || [];
+            
+            // Если entryPrices пустые — попробуем загрузить из биржи по entryOrderIds
+            if (entryPrices.length === 0 && task.entryOrderIds && task.entryOrderIds.length > 0) {
+              try {
+                const entryIdSet = new Set(task.entryOrderIds.map(String));
+                const openOrders = await ex.fetchOpenOrders(symbol) as any[];
+                const algoOrders = await ex.fetchOpenAlgoOrders(symbol);
+                
+                for (const o of openOrders) {
+                  const orderId = String(o.id || o.info?.orderId || "");
+                  if (entryIdSet.has(orderId)) {
+                    const p = Number(o.price || o.stopPrice || o.info?.price || o.info?.stopPrice || 0);
+                    if (p > 0) entryPrices.push(p);
+                  }
+                }
+                for (const ao of algoOrders) {
+                  const algoId = String(ao.algoId || ao.clientAlgoId || "");
+                  if (entryIdSet.has(algoId)) {
+                    const p = Number(ao.triggerPrice || ao.price || ao.stopPrice || 0);
+                    if (p > 0) entryPrices.push(p);
+                  }
+                }
+                
+                // Сохраняем найденные цены в task
+                if (entryPrices.length > 0) {
+                  task.entryPrices = entryPrices;
+                  book.save(); // Персистим
+                  console.log(`[AUTOFIX] Loaded entryPrices from exchange for #${task.id}: ${entryPrices.join(', ')}`);
+                }
+              } catch (e: any) {
+                console.log(`[AUTOFIX] Failed to load entryPrices: ${e?.message}`);
+              }
+            }
+            
+            // Теперь исправляем taskEntryAvg если есть entryPrices
+            if (entryPrices.length > 0) {
+              const correctEntryAvg = entryPrices.reduce((a, b) => a + b, 0) / entryPrices.length;
               const currentAvg = task.taskEntryAvg || 0;
               
               // Если текущий avg отличается от правильного более чем на 1% — исправляем
@@ -648,13 +683,43 @@ export function startTaskRecoveryLoop(
                 book.setTaskEntry(task, correctEntryAvg, taskQty);
                 log(`🔧 Recovery: АВТОФИКС taskEntryAvg для #${task.id} ${symbol}: ${currentAvg.toFixed(2)} → ${correctEntryAvg.toFixed(2)} (из entryPrices)`);
               }
-            } else if ((!task.taskEntryAvg || task.taskEntryAvg <= 0) && entryAvg > 0 && posSize > 0) {
-              // Fallback: если нет entryPrices, используем среднюю позиции (для очень старых задач)
-              const taskQty = task.totalUsd && task.totalUsd > 0 && entryAvg > 0
-                ? Math.min(posSize, task.totalUsd / entryAvg)
+            } else if (entryAvg > 0 && posSize > 0) {
+              // Fallback для старых задач без entryPrices:
+              // Пытаемся вычислить более точную цену входа
+              
+              let correctEntryAvg = entryAvg; // По умолчанию — средняя позиции
+              
+              // Если есть другие задачи на этом символе, пробуем вычислить цену входа этой задачи
+              // newEntryPrice = (totalAvg * totalQty - oldAvg * oldQty) / newQty
+              const otherTasks = ts.filter(t => t.id !== task.id && t.taskEntryAvg && t.taskEntryAvg > 0 && t.taskEntryQty && t.taskEntryQty > 0);
+              if (otherTasks.length > 0 && task.totalUsd && task.totalUsd > 0) {
+                const oldTasksQty = otherTasks.reduce((sum, t) => sum + (t.taskEntryQty || 0), 0);
+                const oldTasksValue = otherTasks.reduce((sum, t) => sum + (t.taskEntryQty || 0) * (t.taskEntryAvg || 0), 0);
+                const totalValue = entryAvg * posSize;
+                const thisTaskQty = posSize - oldTasksQty;
+                
+                if (thisTaskQty > 0) {
+                  const thisTaskValue = totalValue - oldTasksValue;
+                  const calculatedPrice = thisTaskValue / thisTaskQty;
+                  // Санитарная проверка: цена должна быть разумной (±50% от средней)
+                  if (calculatedPrice > entryAvg * 0.5 && calculatedPrice < entryAvg * 1.5) {
+                    correctEntryAvg = calculatedPrice;
+                    console.log(`[AUTOFIX] Calculated entry price for #${task.id}: ${correctEntryAvg.toFixed(4)} (from position math)`);
+                  }
+                }
+              }
+              
+              const taskQty = task.totalUsd && task.totalUsd > 0 && correctEntryAvg > 0
+                ? Math.min(posSize, task.totalUsd / correctEntryAvg)
                 : posSize;
-              book.setTaskEntry(task, entryAvg, taskQty);
-              log(`🔄 Recovery: инициализированы entry данные для #${task.id} ${symbol}: avg=${entryAvg}, taskQty=${fmtQty5(taskQty)}`);
+              
+              const currentAvg = task.taskEntryAvg || 0;
+              const diff = Math.abs(currentAvg - correctEntryAvg) / Math.max(correctEntryAvg, 1e-12);
+              
+              if (diff > 0.01 || currentAvg <= 0) {
+                book.setTaskEntry(task, correctEntryAvg, taskQty);
+                log(`🔄 Recovery: инициализированы entry данные для #${task.id} ${symbol}: avg=${correctEntryAvg.toFixed(4)}, taskQty=${fmtQty5(taskQty)}`);
+              }
             }
             
             try {
