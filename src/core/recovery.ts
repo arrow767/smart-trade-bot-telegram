@@ -213,21 +213,21 @@ async function ensureBracketsForTask(
   let needRecalcTP = false;
   let correctTPPrices: number[] = [];
   
-  // Рассчитываем правильные цены TP от средней и объёма ЭТОЙ task
+  // Рассчитываем правильные цены TP от средней ЭТОЙ task и ЗАПЛАНИРОВАННОГО объёма
   const tpEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
-  const tpEntryQty = task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize;
   const tpRiskUsd = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
   
-  // ✅ КРИТИЧНО: positionUsd = объём ЭТОЙ task (для расчёта РАССТОЯНИЯ TP)
-  // НЕ вся позиция! Иначе расстояние будет меньше чем нужно
-  const taskPositionUsd = tpEntryQty * tpEntryAvg;
+  // ✅ КРИТИЧНО: positionUsd = task.totalUsd (ЗАПЛАНИРОВАННЫЙ объём, не текущий!)
+  // r = riskUsd / totalUsd — это фиксируется при создании task
+  const taskTotalUsd = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (actualPosSize * entryAvg);
   const planningForPrices = { ...preset, trade_risk: tpRiskUsd } as any;
   
   // 🔍 ДИАГНОСТИКА: выводим все значения для отладки
+  const rPercent = tpRiskUsd / taskTotalUsd * 100;
   console.log(`[DIAG] Task #${task.id} ${symbol}:`);
-  console.log(`  side=${side}, taskEntryAvg=${tpEntryAvg}, taskEntryQty=${fmtQty5(tpEntryQty)}`);
-  console.log(`  riskUsd=${tpRiskUsd}, taskPositionUsd=${taskPositionUsd.toFixed(2)}`);
-  console.log(`  task.taskEntryAvg=${task.taskEntryAvg}, task.taskEntryQty=${task.taskEntryQty}`);
+  console.log(`  side=${side}, taskEntryAvg=${tpEntryAvg}`);
+  console.log(`  riskUsd=$${tpRiskUsd}, totalUsd=$${taskTotalUsd.toFixed(2)}, r=${rPercent.toFixed(2)}%`);
+  console.log(`  task.totalUsd=${task.totalUsd}, task.taskEntryAvg=${task.taskEntryAvg}`);
   console.log(`  entryAvg(exchange)=${entryAvg}, actualPosSize=${fmtQty5(actualPosSize)}`);
   console.log(`  preset.take_profit=${JSON.stringify(preset.take_profit)}`);
   console.log(`  hasSL=${hasSL}, hasTP=${hasTP}, needRecalcSL=${needRecalcSL}`);
@@ -235,7 +235,7 @@ async function ensureBracketsForTask(
   const tpResult = planTargets({ 
     side, 
     entryPrice: tpEntryAvg,  // ✅ Цена от средней ЭТОЙ task
-    positionUsd: taskPositionUsd,  // ✅ Объём ЭТОЙ task (для расстояния!)
+    positionUsd: taskTotalUsd,  // ✅ ЗАПЛАНИРОВАННЫЙ объём task (для расстояния!)
     preset: planningForPrices 
   });
   correctTPPrices = tpResult.tpPrices.map(p => Number(ex.priceToPrecision(symbol, p)));

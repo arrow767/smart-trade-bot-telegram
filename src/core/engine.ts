@@ -241,11 +241,11 @@ async function handleTaskChaining(
       log(`🔗 Цепочка: новый SL @ ${safeSL} (от ${newTaskEntryAvg}, risk=$${baseRisk}, qty=${fmtQty5(newTaskEntryQty)})`);
     }
     
-    // ✅ КЛЮЧЕВОЕ: Для ЦЕН TP используем объём ЭТОЙ task (для расстояния)
+    // ✅ КЛЮЧЕВОЕ: Для ЦЕН TP используем task.totalUsd (запланированный объём!)
     // Для ОБЪЁМА TP ордеров используем totalPositionQty (вся позиция)
-    const taskPositionUsd = newTaskEntryQty * newTaskEntryAvg; // Объём ЭТОЙ task для расстояния
+    const taskTotalUsd = newTask.totalUsd && newTask.totalUsd > 0 ? newTask.totalUsd : (newTaskEntryQty * newTaskEntryAvg);
     const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd: taskPositionUsd, preset: planningPreset });
+    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd: taskTotalUsd, preset: planningPreset });
     
     let tpQtys = splitQtyToStep(totalPositionQty, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
@@ -1418,11 +1418,11 @@ export async function runCommand(
 
               // TP ставим только если их реально нет
               if (!hasTPNow && !tpsPlaced) {
-                // ✅ КРИТИЧНО: TP цены от средней TASK (slEntryAvg), объём от TASK (slEntryQty)
-                // Но КОЛИЧЕСТВО TP — на всю позицию (posSize)
-                const taskPositionUsdForTP = slEntryQty * slEntryAvg;
+                // ✅ КРИТИЧНО: TP цены от средней TASK, расстояние от task.totalUsd (не текущей позиции!)
+                // КОЛИЧЕСТВО TP — на всю позицию (posSize)
+                const taskTotalUsdForTP = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (slEntryQty * slEntryAvg);
                 const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: slEntryAvg, positionUsd: taskPositionUsdForTP, preset: planningPreset });
+                const re = planTargets({ side, entryPrice: slEntryAvg, positionUsd: taskTotalUsdForTP, preset: planningPreset });
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -2160,18 +2160,20 @@ export async function runCommand(
                   // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи для КОЛИЧЕСТВА TP
                 const actualPosSizeForTP = actualPosSize;
                 
-                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю и объём ЭТОЙ task
-                // Расстояние TP = risk / taskPositionUsd, где taskPositionUsd = объём ЭТОЙ task
+                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю ЭТОЙ task
+                // Расстояние TP = risk / task.totalUsd (ЗАПЛАНИРОВАННЫЙ объём, не текущий!)
                 const tpEntryAvg = slEntryAvg; // Средняя ЭТОЙ task
-                const tpEntryQty = slEntryQty; // Объём ЭТОЙ task
-                const taskPositionUsd = tpEntryQty * tpEntryAvg; // Для расчёта РАССТОЯНИЯ (не объёма!)
+                
+                // ✅ ИСПРАВЛЕНО: Используем task.totalUsd для расчёта расстояния, а не текущую позицию
+                // Это важно! Расстояние SL/TP определяется соотношением risk/totalUsd при создании task
+                const taskTotalUsd = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (slEntryQty * slEntryAvg);
                 
                 const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: taskPositionUsd, preset: planningPreset2 });
+                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: taskTotalUsd, preset: planningPreset2 });
 
                 // 🔍 ДИАГНОСТИКА TP
-                const rPercent = baseRisk / taskPositionUsd * 100;
-                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, posUsd=$${taskPositionUsd.toFixed(2)}, risk=$${baseRisk}, r=${rPercent.toFixed(2)}%`);
+                const rPercent = baseRisk / taskTotalUsd * 100;
+                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, totalUsd=$${taskTotalUsd.toFixed(2)}, risk=$${baseRisk}, r=${rPercent.toFixed(2)}%`);
                 console.log(`[TP CALC] TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`);
                 console.log(`[TP CALC] take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`);
 
@@ -2377,16 +2379,13 @@ export async function runCommand(
                 ? task.riskUsd
                 : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
             
-            // ✅ КРИТИЧНО: TP цены от средней TASK (taskEntryAvg), расстояние от объёма TASK
+            // ✅ КРИТИЧНО: TP цены от средней TASK, расстояние от task.totalUsd (не текущей позиции!)
             const currentTaskFallback = book.get(task.id);
             const tpEntryAvgFallback = currentTaskFallback?.taskEntryAvg || entryAvg;
-            const tpEntryQtyFallback = task.totalUsd && task.totalUsd > 0 && tpEntryAvgFallback > 0
-              ? task.totalUsd / tpEntryAvgFallback
-              : posSize;
-            const taskPositionUsdFallback = tpEntryQtyFallback * tpEntryAvgFallback;
+            const taskTotalUsdFallback = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (posSize * entryAvg);
             
             const planningPreset = { ...presetForRisk, trade_risk: baseRisk } as any;
-            const re = planTargets({ side, entryPrice: tpEntryAvgFallback, positionUsd: taskPositionUsdFallback, preset: planningPreset });
+            const re = planTargets({ side, entryPrice: tpEntryAvgFallback, positionUsd: taskTotalUsdFallback, preset: planningPreset });
             let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
             tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
