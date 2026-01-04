@@ -1423,8 +1423,13 @@ export async function runCommand(
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
+                
+                // ✅ НОВОЕ: Пропускаем уже заполненные (съеденные) TP
+                const currentTaskForTP = book.get(task.id);
+                const filledTpCount = currentTaskForTP?.filledTpCount || 0;
+                
                 let tpPlacedCount = 0;
-                for (let i = 0; i < re.tpPrices.length; i++) {
+                for (let i = filledTpCount; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0) continue;
                   const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
@@ -2176,8 +2181,12 @@ export async function runCommand(
                   }
                 }
                 
+                // ✅ НОВОЕ: Пропускаем уже заполненные (съеденные) TP
+                const currentTaskForTP = book.get(task.id);
+                const filledTpCount = currentTaskForTP?.filledTpCount || 0;
+                
                 let tpPlacedCount = 0;
-                for (let i = 0; i < re.tpPrices.length; i++) {
+                for (let i = filledTpCount; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0 || q < filters.minQty) continue;
                   const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
@@ -2330,7 +2339,16 @@ export async function runCommand(
             const openIds = new Set(current.map((o: any) => String(o.id || "")));
             const map = tpIndexById;
             const goneIds = Array.from(map.entries()).filter(([id]) => !openIds.has(id)).map(([, idx]) => idx);
-            if (goneIds.length) tpNo = Math.min(...goneIds);
+            if (goneIds.length) {
+              tpNo = Math.min(...goneIds);
+              // ✅ НОВОЕ: Инкрементируем filledTpCount когда TP съеден
+              const currentTask = book.get(task.id);
+              if (currentTask) {
+                const prevCount = currentTask.filledTpCount || 0;
+                currentTask.filledTpCount = prevCount + goneIds.length;
+                book.set(currentTask, currentTask.status);
+              }
+            }
           } catch {}
           const tpTag = tpNo ? `TP${tpNo}` : `TP`;
           info(mode === "console" ? `${tpTag}/выход: -${closed.toFixed(5)} по ${symbolCcxt}` : `<b>${tpTag}/выход</b>: −${closed.toFixed(5)} по <code>${symbolCcxt}</code>`);
