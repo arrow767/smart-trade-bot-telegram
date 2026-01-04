@@ -178,25 +178,65 @@ async function ensureBracketsForTask(
     }
   }
 
-  // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть
-  if (hasSL && hasTP) {
-    return;
-  }
-
   const preset = await getPreset(task.presetName || DEFAULT_PRESET);
   const side = task.side || pos.side;
   const sideExit = side === "long" ? "sell" : "buy";
 
+  // ✅ КЛЮЧЕВОЕ: Для SL используем данные ЭТОЙ task, а не всей позиции (важно для цепочки)
+  const slEntryAvg = task.taskEntryAvg && task.taskEntryAvg > 0 ? task.taskEntryAvg : entryAvg;
+  const slEntryQty = task.taskEntryQty && task.taskEntryQty > 0 ? task.taskEntryQty : actualPosSize;
+  
+  // ✅ НОВОЕ: Проверяем нужно ли пересчитать SL (если он на неправильном расстоянии)
+  let needRecalcSL = false;
+  if (hasSL && task.taskEntryAvg && task.taskEntryAvg > 0) {
+    // Найти текущую цену SL
+    const currentSLOrder = all.find((o: any) => {
+      const t = String(o?.type || o?.orderType || "").toUpperCase();
+      const cp = o?.closePosition === true || o?.closePosition === "true" || 
+                 o?.info?.closePosition === true || o?.info?.closePosition === "true";
+      return (t.includes("STOP") && !t.includes("TAKE_PROFIT")) && cp;
+    });
+    const currentSLPrice = Number(currentSLOrder?.stopPrice || currentSLOrder?.triggerPrice || currentSLOrder?.price || 0);
+    
+    if (currentSLPrice > 0) {
+      // Рассчитать правильную цену SL
+      const taskUsdForCheck = slEntryQty * slEntryAvg;
+      const baseRiskForCheck = (typeof task.riskUsd === "number" && task.riskUsd > 0) ? task.riskUsd : preset.trade_risk;
+      const factorForCheck = Math.min(1, taskUsdForCheck / Math.max(1, task.totalUsd ?? taskUsdForCheck));
+      const correctSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, baseRiskForCheck * factorForCheck);
+      
+      // Если отличается более чем на 1% — пересчитываем
+      const diff = Math.abs(currentSLPrice - correctSL) / Math.max(correctSL, 1e-12);
+      if (diff > 0.01) {
+        needRecalcSL = true;
+        // Снимаем старый SL
+        if (currentSLOrder?.id || currentSLOrder?.algoId) {
+          const orderId = String(currentSLOrder.algoId || currentSLOrder.id);
+          try { await ex.cancelAlgoOrder(symbol, orderId); } catch {}
+          try { await ex.cancelOrder(symbol, orderId); } catch {}
+        }
+        log(`🔄 Recovery: SL пересчитывается для #${task.id} ${symbol} (${currentSLPrice} → ${correctSL.toFixed(4)}, diff=${(diff * 100).toFixed(1)}%)`);
+      }
+    }
+  }
+  
+  // ✅ ИСПРАВЛЕНО: Возвращаемся только если ОБА есть И не нужен пересчёт
+  if (hasSL && !needRecalcSL && hasTP) {
+    return;
+  }
+  
   const positionUsd = actualPosSize * entryAvg;
-  const totalPlannedUsd = task.totalUsd ?? positionUsd;
+  const taskUsd = slEntryQty * slEntryAvg;
+  const totalPlannedUsd = task.totalUsd ?? taskUsd;
   const baseRisk =
     (typeof task.riskUsd === "number" && Number.isFinite(task.riskUsd) && task.riskUsd > 0)
       ? task.riskUsd
       : (Number.isFinite(preset.trade_risk) && preset.trade_risk > 0 ? preset.trade_risk : 0);
-  const factor = Math.min(1, positionUsd / Math.max(1, totalPlannedUsd));
+  // ✅ factor от объёма ЭТОЙ task
+  const factor = Math.min(1, taskUsd / Math.max(1, totalPlannedUsd));
   const effectiveRiskUsd = baseRisk * factor;
 
-  if (!hasSL) {
+  if (!hasSL || needRecalcSL) {
     // ✅ КРИТИЧНО: Ещё раз проверяем что позиция существует перед размещением SL
     try {
       const checkPos = Math.abs(await ex.fetchPositionSize(symbol));
@@ -209,7 +249,8 @@ async function ensureBracketsForTask(
       return;
     }
     
-    const desiredSL = calcDesiredSLByRiskUsd(side, entryAvg, actualPosSize, effectiveRiskUsd);
+    // ✅ SL: от средней и объёма ЭТОЙ task
+    const desiredSL = calcDesiredSLByRiskUsd(side, slEntryAvg, slEntryQty, effectiveRiskUsd);
     const precSL = Number(ex.priceToPrecision(symbol, desiredSL));
     const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
     const safeSL = Number(ex.priceToPrecision(symbol, safeSL0));
