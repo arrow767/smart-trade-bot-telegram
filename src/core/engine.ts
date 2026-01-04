@@ -212,9 +212,9 @@ async function handleTaskChaining(
     return { chainHandled: false, supersededTaskIds: [] };
   }
   
-  // Теперь выставляем новые SL/TP для новой задачи
-  // SL: от средней цены НОВОЙ task, на риск = preset.trade_risk, на объём ТОЛЬКО новой task
-  // TP: от средней цены НОВОЙ task, на весь объём позиции
+  // ✅ ИСПРАВЛЕНО: При цепочке выставляем ТОЛЬКО SL!
+  // TP выставляются только когда ВСЕ отложки новой задачи исполнены (allLegsFilled = true)
+  // SL: от средней цены НОВОЙ task, на риск = task.riskUsd, на ЗАПЛАНИРОВАННЫЙ объём task
   
   try {
     const preset = await getPreset(newTask.presetName || DEFAULT_PRESET);
@@ -226,8 +226,13 @@ async function handleTaskChaining(
       ? newTask.riskUsd
       : preset.trade_risk;
     
-    // ✅ КЛЮЧЕВОЕ: SL рассчитываем на объём ТОЛЬКО новой task
-    const desiredSL = calcDesiredSLByRiskUsd(side, newTaskEntryAvg, newTaskEntryQty, baseRisk);
+    // ✅ КЛЮЧЕВОЕ: SL рассчитываем на ЗАПЛАНИРОВАННЫЙ объём task (totalUsd), не текущий!
+    // Это даёт правильное расстояние SL сразу, даже при частичном исполнении
+    const plannedQty = newTask.totalUsd && newTask.totalUsd > 0 && newTaskEntryAvg > 0
+      ? newTask.totalUsd / newTaskEntryAvg
+      : newTaskEntryQty;
+    
+    const desiredSL = calcDesiredSLByRiskUsd(side, newTaskEntryAvg, plannedQty, baseRisk);
     const precSL = Number(ex.priceToPrecision(symbolCcxt, desiredSL));
     const safeSL0 = adjustStopForMark(side, precSL, mark, filters.tickSize || 0.0001);
     const safeSL = Number(ex.priceToPrecision(symbolCcxt, safeSL0));
@@ -237,34 +242,15 @@ async function handleTaskChaining(
       await cancelOnlySL(ex, symbolCcxt, new Set()).catch(() => {});
       // Выставляем новый SL
       await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
-      log(`🔗 Цепочка: новый SL @ ${safeSL} (от ${newTaskEntryAvg}, risk=$${baseRisk}, qty=${fmtQty5(newTaskEntryQty)})`);
+      log(`🔗 Цепочка: SL @ ${safeSL} (от ${newTaskEntryAvg.toFixed(4)}, risk=$${baseRisk}, plannedQty=${fmtQty5(plannedQty)})`);
     }
     
-    // ✅ КЛЮЧЕВОЕ: Для ЦЕН TP используем task.totalUsd (запланированный объём!)
-    // Для ОБЪЁМА TP ордеров используем totalPositionQty (вся позиция)
-    const taskTotalUsd = newTask.totalUsd && newTask.totalUsd > 0 ? newTask.totalUsd : (newTaskEntryQty * newTaskEntryAvg);
-    const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-    const re = planTargets({ side, entryPrice: newTaskEntryAvg, positionUsd: taskTotalUsd, preset: planningPreset });
-    
-    let tpQtys = splitQtyToStep(totalPositionQty, preset.take_profit_ratio, filters.stepSize);
-    tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
-    tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
-    
-    let tpPlacedCount = 0;
-    for (let i = 0; i < re.tpPrices.length; i++) {
-      const q = tpQtys[i];
-      if (q <= 0) continue;
-      const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
-      await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
-      tpPlacedCount++;
-    }
-    
-    if (tpPlacedCount > 0) {
-      log(`🔗 Цепочка: новые TP выставлены (${tpPlacedCount} ордеров, от ${newTaskEntryAvg}, totalQty=${fmtQty5(totalPositionQty)})`);
-    }
+    // ✅ ВАЖНО: TP НЕ ставим здесь! Они будут выставлены когда allLegsFilled = true
+    // Это критично для правильной логики — TP только после полного набора позиции
+    log(`🔗 Цепочка: TP будут выставлены после исполнения всех отложек`);
     
   } catch (e: any) {
-    console.error(`[ERROR] handleTaskChaining failed to place SL/TP: ${e?.message}`);
+    console.error(`[ERROR] handleTaskChaining failed to place SL: ${e?.message}`);
   }
   
   return { chainHandled: true, supersededTaskIds };
@@ -1293,8 +1279,19 @@ export async function runCommand(
     await ex.createMarketEntry(symbolCcxt, sideEntry as any, pick.qty);
     info(`🟩 MARKET вход: ~${fmtQty5(pick.qty)} @ ~${markPrice}`);
 
-    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { side, totalUsd: market.usd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset });
+    const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { 
+      side, 
+      totalUsd: market.usd, 
+      presetName: presetNameEffective, 
+      riskUsd: calculatedRiskUsd, 
+      noPreset,
+      entryLegsCount: 1  // ✅ MARKET = 1 leg (сразу заполнится)
+    });
     book.setEntryOrders(task, [] as string[]);
+    
+    // ✅ MARKET вход = сразу все legs заполнены (1 leg мгновенно исполняется)
+    book.incrementFilledLegs(task, 1);
+    book.setAllLegsFilled(task, true);
 
     book.set(task, "waiting_fill");
     (async () => {
@@ -1689,7 +1686,15 @@ export async function runCommand(
   const task = book.add(
     symbolCcxt,
     `${side.toUpperCase()} multi ${legs.length} legs (Σ$${totalUsd})`,
-    { side, totalUsd, presetName: presetNameEffective, riskUsd: calculatedRiskUsd, noPreset, entryPrices }
+    { 
+      side, 
+      totalUsd, 
+      presetName: presetNameEffective, 
+      riskUsd: calculatedRiskUsd, 
+      noPreset, 
+      entryPrices,
+      entryLegsCount: legs.length  // ✅ Количество отложек в задаче
+    }
   );
   book.setEntryOrders(task, entryIds);
   
@@ -1766,6 +1771,9 @@ export async function runCommand(
       let tempErrorCount = 0;
       const MAX_TEMP_ERRORS_BEFORE_LOG = 3; // Логируем только каждую N-ую временную ошибку
       
+      // ✅ НОВОЕ: Отслеживание заполнения legs
+      let lastEntriesLeft = entryIds.length; // Изначально = количество entry ордеров
+      
       for (;;) {
         // ✅ КРИТИЧНО: Если задача удалена из book (например через cancel) — выходим из цикла
         const currentTask = book.get(task.id);
@@ -1834,6 +1842,21 @@ export async function runCommand(
                    String(o.clientOrderId || o.clientAlgoId || o.newClientOrderId || "") === idStr
                  );
         }).length;
+        
+        // ✅ НОВОЕ: Отслеживаем исполнение entry ордеров (legs)
+        const currentTaskForLegs = book.get(task.id);
+        if (currentTaskForLegs && entriesLeft < lastEntriesLeft) {
+          const filledNow = lastEntriesLeft - entriesLeft;
+          const allFilled = book.incrementFilledLegs(currentTaskForLegs, filledNow);
+          console.log(`[LEGS] Task #${task.id}: ${filledNow} leg(s) filled, entriesLeft=${entriesLeft}, allFilled=${allFilled}`);
+          
+          // Если все отложки заполнены — помечаем
+          if (allFilled || entriesLeft === 0) {
+            book.setAllLegsFilled(currentTaskForLegs, true);
+            console.log(`[LEGS] Task #${task.id}: ALL LEGS FILLED — готовы к выставлению TP`);
+          }
+        }
+        lastEntriesLeft = entriesLeft;
         
         // ✅ НОВОЕ: Отслеживаем, были ли ордера когда-либо видны
         const hasVisibleOrders = entryIds.some(id => {
@@ -2190,9 +2213,12 @@ export async function runCommand(
               }
             }
 
-            // ✅ УПРОЩЕНО: Выставляем TP если они ещё не выставлены
-            // Не зависим от entriesLeft или lastSize - если позиция есть и TP не выставлены → выставляем
-            if (!tpsPlaced) {
+            // ✅ ИСПРАВЛЕНО: TP выставляем ТОЛЬКО когда ВСЕ отложки задачи исполнены!
+            // Это ключевой момент логики: TP ставятся после полного набора позиции по задаче
+            const taskForTP = book.get(task.id);
+            const allLegsFilledNow = taskForTP?.allLegsFilled === true || entriesLeft === 0;
+            
+            if (!tpsPlaced && allLegsFilledNow) {
               try {
                 // ✅ КРИТИЧНО: Проверяем что позиция реально существует на бирже
                 const actualPosSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
@@ -2409,10 +2435,13 @@ export async function runCommand(
           lastAvg = entryAvg;
         }
 
-        // Доп. гарантированная постановка TP, если все входные заявки исчезли,
+        // Доп. гарантированная постановка TP, если все отложки исполнены,
         // позиция > 0, а TP ещё не поставлены (мог пропасть "increased" триггер)
-        // ✅ НОВОЕ: Пропускаем если пресеты отключены
-        if (!noPreset && !tpsPlaced && entriesLeft === 0 && posSize > 0) {
+        // ✅ ИСПРАВЛЕНО: TP только когда allLegsFilled = true
+        const taskForFallbackTP = book.get(task.id);
+        const allLegsFilledFallback = taskForFallbackTP?.allLegsFilled === true || entriesLeft === 0;
+        
+        if (!noPreset && !tpsPlaced && allLegsFilledFallback && posSize > 0) {
           try {
             const filters = ex.getSymbolFilters(symbolCcxt);
             const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);

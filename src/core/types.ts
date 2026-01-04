@@ -118,6 +118,24 @@ export type Task = {
    * При восстановлении TP пропускаем первые N (где N = filledTpCount).
    */
   filledTpCount?: number;
+  
+  /**
+   * ✅ НОВОЕ: Количество входных ордеров (отложек) в задаче.
+   * Нужно для определения когда все отложки заполнены.
+   */
+  entryLegsCount?: number;
+  
+  /**
+   * ✅ НОВОЕ: Количество уже исполненных входных ордеров (отложек).
+   * Когда filledLegsCount === entryLegsCount — все отложки заполнены.
+   */
+  filledLegsCount?: number;
+  
+  /**
+   * ✅ НОВОЕ: Флаг что все отложки задачи исполнены.
+   * TP выставляются ТОЛЬКО когда allLegsFilled = true.
+   */
+  allLegsFilled?: boolean;
 };
 
 export const DEFAULT_PRESET = "4h";

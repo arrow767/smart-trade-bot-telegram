@@ -103,7 +103,15 @@ export class TaskBook {
   add(
     symbolCcxt: string,
     label: string,
-    extras?: { side?: "long" | "short"; totalUsd?: number; presetName?: string; riskUsd?: number; noPreset?: boolean; entryPrices?: number[] }
+    extras?: { 
+      side?: "long" | "short"; 
+      totalUsd?: number; 
+      presetName?: string; 
+      riskUsd?: number; 
+      noPreset?: boolean; 
+      entryPrices?: number[];
+      entryLegsCount?: number;  // ✅ НОВОЕ: количество отложек в задаче
+    }
   ) {
     const t: Task = {
       id: TASK_ID_SEQ++,
@@ -118,6 +126,9 @@ export class TaskBook {
       riskUsd: (typeof extras?.riskUsd === "number" && Number.isFinite(extras.riskUsd) && extras.riskUsd > 0) ? extras.riskUsd : undefined,
       noPreset: extras?.noPreset || false,
       entryPrices: extras?.entryPrices,
+      entryLegsCount: extras?.entryLegsCount || 0,
+      filledLegsCount: 0,
+      allLegsFilled: false,
     };
     this.tasks.set(t.id, t);
     this.save();
@@ -165,6 +176,11 @@ export class TaskBook {
           taskEntryQty: Number(o.taskEntryQty || 0) || undefined,
           supersededBy: Number(o.supersededBy || 0) || undefined,
           noPreset: o.noPreset === true || o.noPreset === "true",
+          entryPrices: Array.isArray(o.entryPrices) ? o.entryPrices.map(Number) : undefined,
+          filledTpCount: Number(o.filledTpCount || 0) || undefined,
+          entryLegsCount: Number(o.entryLegsCount || 0) || undefined,
+          filledLegsCount: Number(o.filledLegsCount || 0) || undefined,
+          allLegsFilled: o.allLegsFilled === true || o.allLegsFilled === "true",
         };
         this.tasks.set(t.id, t);
       }
@@ -209,6 +225,44 @@ export class TaskBook {
    */
   incrementFilledTp(t: Task, count: number = 1) {
     t.filledTpCount = (t.filledTpCount || 0) + count;
+    t.updatedAt = new Date();
+    this.save();
+  }
+  
+  /**
+   * ✅ НОВОЕ: Инкрементирует счётчик заполненных отложек (legs)
+   * @returns true если все отложки теперь заполнены
+   */
+  incrementFilledLegs(t: Task, count: number = 1): boolean {
+    t.filledLegsCount = (t.filledLegsCount || 0) + count;
+    const totalLegs = t.entryLegsCount || 0;
+    
+    // Проверяем все ли отложки заполнены
+    if (totalLegs > 0 && (t.filledLegsCount || 0) >= totalLegs) {
+      t.allLegsFilled = true;
+    }
+    
+    t.updatedAt = new Date();
+    this.save();
+    return t.allLegsFilled || false;
+  }
+  
+  /**
+   * ✅ НОВОЕ: Принудительно установить что все отложки заполнены
+   */
+  setAllLegsFilled(t: Task, filled: boolean = true) {
+    t.allLegsFilled = filled;
+    t.updatedAt = new Date();
+    this.save();
+  }
+  
+  /**
+   * ✅ НОВОЕ: Сбросить данные о заполнении legs (для цепочки задач)
+   */
+  resetLegsData(t: Task) {
+    t.filledLegsCount = 0;
+    t.allLegsFilled = false;
+    t.filledTpCount = 0;  // Сбрасываем и TP счётчик
     t.updatedAt = new Date();
     this.save();
   }

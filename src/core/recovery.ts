@@ -218,6 +218,28 @@ async function ensureBracketsForTask(
     }
     log(`🔄 Recovery: задача #${task.id} ${symbol} переведена в live (taskQty=${fmtQty5(task.taskEntryQty || 0)} @ ${entryAvg})`);
   }
+  
+  // ✅ НОВОЕ: Автоопределение allLegsFilled при recovery
+  // Если позиция есть и entry ордеров не осталось — значит все legs заполнены
+  if (!task.allLegsFilled) {
+    // Получаем открытые ордера
+    const openOrders = (await ex.fetchOpenOrders(symbol).catch(() => [])) as any[];
+    const algoOrders = await ex.fetchOpenAlgoOrders(symbol).catch(() => []);
+    const allOrders = [...openOrders, ...algoOrders];
+    
+    // Проверяем остались ли entry ордера
+    const entryIds = new Set((task.entryOrderIds || []).map(String));
+    const entriesLeft = allOrders.filter((o: any) => {
+      const orderId = String(o.id || o.orderId || o.algoId || o.clientOrderId || "");
+      return entryIds.has(orderId);
+    }).length;
+    
+    // Если позиция есть и entry ордеров нет — все legs заполнены
+    if (actualPosSize > minQty && entriesLeft === 0) {
+      book.setAllLegsFilled(task, true);
+      console.log(`[RECOVERY] Task #${task.id}: auto-detected allLegsFilled=true (pos=${fmtQty5(actualPosSize)}, entriesLeft=0)`);
+    }
+  }
 
   // ✅ НОВОЕ: Если noPreset=true — не ставим SL/TP
   if (task.noPreset) {
@@ -416,6 +438,16 @@ async function ensureBracketsForTask(
     }
   }
 
+  // ✅ КРИТИЧНО: TP выставляем ТОЛЬКО когда allLegsFilled = true!
+  // Если не все отложки исполнены — пропускаем выставление TP
+  const allLegsFilledForTP = task.allLegsFilled === true || 
+    (task.entryLegsCount && task.entryLegsCount > 0 && (task.filledLegsCount || 0) >= task.entryLegsCount);
+  
+  if (!allLegsFilledForTP) {
+    console.log(`[DIAG TP] Task #${task.id}: allLegsFilled=${task.allLegsFilled}, filledLegs=${task.filledLegsCount}/${task.entryLegsCount} — TP пропускаем`);
+    return;
+  }
+  
   if (!hasTP || needRecalcTP) {
     // ✅ КРИТИЧНО: Проверяем позицию перед размещением TP
     let currentPosSize = actualPosSize;
