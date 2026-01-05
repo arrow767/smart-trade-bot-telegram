@@ -2121,15 +2121,20 @@ export async function runCommand(
           return false;
         };
 
-        // ✅ Надёжность: если SL/TP сняты руками, сбрасываем флаги и довыставляем
+        // ✅ Надёжность: если SL сняты руками, сбрасываем флаги и довыставляем
         const hasSLNow = hasClosePositionConditional(allOpenOrders);
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
         
-        // ✅ ВАЖНО: Если есть хотя бы ОДНА TP лимитка — НЕ трогаем их
-        // Это предотвращает бесконечное пересоздание TP после частичного исполнения
-        // TP ставятся ТОЛЬКО если их вообще нет
-        if (!hasTPNow) {
+        // ✅ УПРОЩЁННАЯ ЛОГИКА TP:
+        // - Если есть хотя бы 1 TP → НИЧЕГО НЕ ТРОГАЕМ
+        // - Если TP = 0 И позиция УВЕЛИЧИЛАСЬ И allLegsFilled → ставим TP
+        // - Если позиция УМЕНЬШИЛАСЬ → не трогаем (TP сработали, это норма)
+        const positionIncreased = posSize > lastSize + 1e-9;
+        const positionDecreased = posSize < lastSize - 1e-9;
+        
+        // Сбрасываем флаг tpsPlaced только если TP=0 И позиция увеличилась
+        if (!hasTPNow && positionIncreased) {
           tpsPlaced = false;
         }
 
@@ -2213,12 +2218,18 @@ export async function runCommand(
               }
             }
 
-            // ✅ ИСПРАВЛЕНО: TP выставляем ТОЛЬКО когда ВСЕ отложки задачи исполнены!
-            // Это ключевой момент логики: TP ставятся после полного набора позиции по задаче
+            // ✅ УПРОЩЁННАЯ ЛОГИКА TP:
+            // 1. hasTPNow = true → ничего не трогаем (есть хотя бы 1 TP)
+            // 2. hasTPNow = false И allLegsFilled И позиция увеличилась → ставим TP
+            // 3. Позиция уменьшилась → не трогаем (TP сработали)
             const taskForTP = book.get(task.id);
             const allLegsFilledNow = taskForTP?.allLegsFilled === true || entriesLeft === 0;
             
-            if (!tpsPlaced && allLegsFilledNow) {
+            // ✅ КРИТИЧНО: TP только если:
+            // - TP = 0 в стакане (hasTPNow = false через tpsPlaced)
+            // - allLegsFilled = true
+            // - НЕ пытаемся ставить если позиция уменьшилась (TP сработали)
+            if (!tpsPlaced && allLegsFilledNow && !positionDecreased) {
               try {
                 // ✅ КРИТИЧНО: Проверяем что позиция реально существует на бирже
                 const actualPosSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
@@ -2437,11 +2448,14 @@ export async function runCommand(
 
         // Доп. гарантированная постановка TP, если все отложки исполнены,
         // позиция > 0, а TP ещё не поставлены (мог пропасть "increased" триггер)
-        // ✅ ИСПРАВЛЕНО: TP только когда allLegsFilled = true
+        // ✅ УПРОЩЁННАЯ ЛОГИКА:
+        // - TP только если TP = 0 в стакане (hasTPNow = false)
+        // - allLegsFilled = true
+        // - Позиция НЕ уменьшилась (если уменьшилась — TP сработали, не довыставляем)
         const taskForFallbackTP = book.get(task.id);
         const allLegsFilledFallback = taskForFallbackTP?.allLegsFilled === true || entriesLeft === 0;
         
-        if (!noPreset && !tpsPlaced && allLegsFilledFallback && posSize > 0) {
+        if (!noPreset && !tpsPlaced && allLegsFilledFallback && !hasTPNow && !positionDecreased && posSize > 0) {
           try {
             const filters = ex.getSymbolFilters(symbolCcxt);
             const presetForRisk = await getPreset(task.presetName || DEFAULT_PRESET);

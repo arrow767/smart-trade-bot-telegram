@@ -438,17 +438,28 @@ async function ensureBracketsForTask(
     }
   }
 
-  // ✅ КРИТИЧНО: TP выставляем ТОЛЬКО когда allLegsFilled = true!
-  // Если не все отложки исполнены — пропускаем выставление TP
+  // ✅ УПРОЩЁННАЯ ЛОГИКА TP:
+  // 1. Если есть хотя бы 1 TP в стакане → НИЧЕГО НЕ ТРОГАЕМ
+  // 2. Если TP = 0 И allLegsFilled → ставим TP
+  // 3. needRecalcTP убираем — не пересчитываем если есть TP
+  
+  // Если есть хотя бы один TP — не трогаем вообще
+  if (hasTP) {
+    console.log(`[DIAG TP] Task #${task.id}: hasTP=true — не трогаем существующие TP`);
+    return;
+  }
+  
+  // Проверяем allLegsFilled
   const allLegsFilledForTP = task.allLegsFilled === true || 
     (task.entryLegsCount && task.entryLegsCount > 0 && (task.filledLegsCount || 0) >= task.entryLegsCount);
   
   if (!allLegsFilledForTP) {
-    console.log(`[DIAG TP] Task #${task.id}: allLegsFilled=${task.allLegsFilled}, filledLegs=${task.filledLegsCount}/${task.entryLegsCount} — TP пропускаем`);
+    console.log(`[DIAG TP] Task #${task.id}: allLegsFilled=${task.allLegsFilled}, filledLegs=${task.filledLegsCount}/${task.entryLegsCount} — TP пропускаем (не все отложки)`);
     return;
   }
   
-  if (!hasTP || needRecalcTP) {
+  // TP = 0 и allLegsFilled = true → ставим TP
+  if (!hasTP) {
     // ✅ КРИТИЧНО: Проверяем позицию перед размещением TP
     let currentPosSize = actualPosSize;
     try {
@@ -461,15 +472,10 @@ async function ensureBracketsForTask(
       console.warn(`[WARN] Recovery TP: ошибка получения позиции для ${symbol}: ${e?.message}`);
     }
     
-    // ✅ Если пересчёт — снимаем старые TP
-    if (needRecalcTP && existingTPs.length > 0) {
-      for (const tpOrder of existingTPs) {
-        const orderId = String(tpOrder.algoId || tpOrder.id);
-        try { await ex.cancelOrder(symbol, orderId); } catch {}
-      }
-    }
+    // ✅ УПРОЩЕНО: Не снимаем старые TP — если дошли сюда, значит TP = 0
+    // Просто ставим новые TP
     
-    // ✅ ИСПРАВЛЕНО: Используем уже рассчитанные correctTPPrices (от средней task)
+    // ✅ Используем уже рассчитанные correctTPPrices (от средней task)
     // Объём TP = вся позиция (currentPosSize)
     let tpQtys = splitQtyToStep(currentPosSize, preset.take_profit_ratio, filters.stepSize);
     tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
