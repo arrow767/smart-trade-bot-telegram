@@ -1414,18 +1414,16 @@ export async function runCommand(
 
               // TP ставим только если их реально нет
               if (!hasTPNow && !tpsPlaced) {
-                // ✅ КРИТИЧНО: TP цены от средней TASK, расстояние от task.totalUsd (не текущей позиции!)
-                // КОЛИЧЕСТВО TP — на всю позицию (posSize)
-                const taskTotalUsdForTP = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (slEntryQty * slEntryAvg);
-                const planningPreset = { ...preset, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: slEntryAvg, positionUsd: taskTotalUsdForTP, preset: planningPreset });
+                // ✅ ИСПРАВЛЕНО: Используем planTPFromSL для единообразия с recovery
+                // TP рассчитываются от реального safeSL (который уже выставлен)
+                const tpPrices = planTPFromSL(side, slEntryAvg, safeSL, preset.take_profit);
+                const re = { tpPrices, stopPrice: safeSL };
                 
                 // 🔍 ДИАГНОСТИКА MARKET TP
-                const rPct = baseRisk / taskTotalUsdForTP * 100;
-                console.log(`[MARKET TP] entry=${slEntryAvg.toFixed(6)}, totalUsd=$${taskTotalUsdForTP.toFixed(2)}, risk=$${baseRisk}, r=${rPct.toFixed(2)}%`);
+                const slDistance = Math.abs(slEntryAvg - safeSL);
+                console.log(`[MARKET TP] entry=${slEntryAvg.toFixed(6)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`);
                 console.log(`[MARKET TP] take_profit multipliers: ${preset.take_profit.join(', ')}`);
                 console.log(`[MARKET TP] TP prices: ${re.tpPrices.map(p => p.toFixed(6)).join(', ')}`);
-                console.log(`[MARKET TP] SL price: ${re.stopPrice.toFixed(6)}, actual safeSL=${safeSL}`);
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -2243,20 +2241,15 @@ export async function runCommand(
                   // ✅ ИСПРАВЛЕНО: Используем актуальный объём позиции с биржи для КОЛИЧЕСТВА TP
                 const actualPosSizeForTP = actualPosSize;
                 
-                // ✅ КРИТИЧНО: Для расчёта ЦЕН TP используем среднюю ЭТОЙ task
-                // Расстояние TP = risk / task.totalUsd (ЗАПЛАНИРОВАННЫЙ объём, не текущий!)
+                // ✅ ИСПРАВЛЕНО: Используем planTPFromSL для единообразия с recovery
+                // TP рассчитываются от реального safeSL (который уже выставлен)
                 const tpEntryAvg = slEntryAvg; // Средняя ЭТОЙ task
-                
-                // ✅ ИСПРАВЛЕНО: Используем task.totalUsd для расчёта расстояния, а не текущую позицию
-                // Это важно! Расстояние SL/TP определяется соотношением risk/totalUsd при создании task
-                const taskTotalUsd = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (slEntryQty * slEntryAvg);
-                
-                const planningPreset2 = { ...presetForRisk, trade_risk: baseRisk } as any;
-                const re = planTargets({ side, entryPrice: tpEntryAvg, positionUsd: taskTotalUsd, preset: planningPreset2 });
+                const tpPrices = planTPFromSL(side, tpEntryAvg, safeSL, presetForRisk.take_profit);
+                const re = { tpPrices, stopPrice: safeSL };
 
                 // 🔍 ДИАГНОСТИКА TP
-                const rPercent = baseRisk / taskTotalUsd * 100;
-                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, totalUsd=$${taskTotalUsd.toFixed(2)}, risk=$${baseRisk}, r=${rPercent.toFixed(2)}%`);
+                const slDistance = Math.abs(tpEntryAvg - safeSL);
+                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`);
                 console.log(`[TP CALC] TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`);
                 console.log(`[TP CALC] take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`);
 
@@ -2464,13 +2457,17 @@ export async function runCommand(
                 ? task.riskUsd
                 : (Number.isFinite(calculatedRiskUsd) && (calculatedRiskUsd as number) > 0 ? (calculatedRiskUsd as number) : presetForRisk.trade_risk);
             
-            // ✅ КРИТИЧНО: TP цены от средней TASK, расстояние от task.totalUsd (не текущей позиции!)
+            // ✅ ИСПРАВЛЕНО: Используем planTPFromSL для единообразия с recovery
             const currentTaskFallback = book.get(task.id);
             const tpEntryAvgFallback = currentTaskFallback?.taskEntryAvg || entryAvg;
-            const taskTotalUsdFallback = task.totalUsd && task.totalUsd > 0 ? task.totalUsd : (posSize * entryAvg);
+            const plannedQtyFallback = task.totalUsd && task.totalUsd > 0 && tpEntryAvgFallback > 0
+              ? task.totalUsd / tpEntryAvgFallback
+              : posSize;
             
-            const planningPreset = { ...presetForRisk, trade_risk: baseRisk } as any;
-            const re = planTargets({ side, entryPrice: tpEntryAvgFallback, positionUsd: taskTotalUsdFallback, preset: planningPreset });
+            // Рассчитываем SL от задачи, потом TP от него
+            const desiredSLFallback = calcDesiredSLByRiskUsd(side, tpEntryAvgFallback, plannedQtyFallback, baseRisk);
+            const tpPricesFallback = planTPFromSL(side, tpEntryAvgFallback, desiredSLFallback, presetForRisk.take_profit);
+            const re = { tpPrices: tpPricesFallback, stopPrice: desiredSLFallback };
             let tpQtys = splitQtyToStep(posSize, presetForRisk.take_profit_ratio, filters.stepSize);
             tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
             tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
