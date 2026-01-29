@@ -202,6 +202,26 @@ async function handleTaskChaining(
     } catch (e: any) {
       console.warn(`[WARN] Failed to cancel bracket for old task #${oldTask.id}: ${e?.message}`);
     }
+    try {
+      const oldEntrySet = new Set((oldTask.entryOrderIds || []).map(String));
+      const openOrders = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+      for (const o of openOrders) {
+        const oid = String(o.id || o.info?.orderId || "");
+        const clientId = String(o.clientOrderId || o.info?.clientOrderId || "");
+        if (oldEntrySet.has(oid) || (clientId && oldEntrySet.has(clientId))) {
+          try { await ex.cancelOrder(symbolCcxt, oid); } catch {}
+        }
+      }
+      try {
+        const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+        for (const ao of algoOrders) {
+          const algoId = String(ao.algoId || ao.orderId || ao.clientAlgoId || "");
+          if (algoId && oldEntrySet.has(algoId)) {
+            try { await ex.cancelAlgoOrder(symbolCcxt, algoId); } catch {}
+          }
+        }
+      } catch {}
+    } catch {}
     
     // Помечаем как superseded
     book.supersede(oldTask.id, newTaskId);
@@ -2089,8 +2109,10 @@ export async function runCommand(
               
               if (chainResult.chainHandled) {
                 chainHandled = true;
-                // SL/TP уже выставлены в handleTaskChaining — пропускаем обычную логику
-                slPxCurrent = 1; // Помечаем что SL есть
+                slPxCurrent = undefined;
+                tpsPlaced = false;
+                tpMessageSent = false;
+                planSent = false;
                 
                 if (chainResult.supersededTaskIds.length > 0) {
                   info(mode === "console" 
@@ -2395,11 +2417,10 @@ export async function runCommand(
                   
                   if (chainResult.chainHandled) {
                     chainHandled = true;
-                    // SL/TP уже выставлены в handleTaskChaining
-                    tpsPlaced = true;
-                    tpMessageSent = true;
-                    slPxCurrent = 1; // Помечаем что SL есть (точное значение не важно)
-                    planSent = true;
+                    tpsPlaced = false;
+                    tpMessageSent = false;
+                    slPxCurrent = undefined;
+                    planSent = false;
                     
                     // Сообщение о цепочке уже отправлено в блоке increased
                   }
