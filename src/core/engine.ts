@@ -1,4 +1,4 @@
-﻿import {
+import {
   getPreset,
   listPresets,
   upsertPreset,
@@ -1316,6 +1316,7 @@ export async function runCommand(
           return false;
         };
 
+
         const hasAnyReduceOnlyTP = (orders: any[]) => {
           for (const o of orders || []) {
             const t = String(o?.type || "").toUpperCase();
@@ -1325,6 +1326,26 @@ export async function runCommand(
             if (isLimit && ro && !cp) return true;
           }
           return false;
+        };
+
+        const getCurrentSLPrice = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || o?.orderType || "").toUpperCase();
+            const isStop = t.includes("STOP") && !t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (!isStop || !cp) continue;
+            const price = Number(
+              o?.stopPrice ??
+              o?.triggerPrice ??
+              o?.price ??
+              o?.info?.stopPrice ??
+              o?.info?.triggerPrice ??
+              o?.info?.price ??
+              0
+            );
+            if (price > 0) return price;
+          }
+          return 0;
         };
 
         const isIgnorableAlgoClosePositionDup = (e: any) => {
@@ -1355,7 +1376,8 @@ export async function runCommand(
           let algo: any[] = [];
           try { algo = await ex.fetchOpenAlgoOrders(symbolCcxt); } catch {}
           const allOpen = [...open, ...algo];
-          const hasSLNow = hasClosePositionConditional(allOpen);
+          const currentSLPrice = getCurrentSLPrice(allOpen);
+          const hasSLNow = currentSLPrice > 0;
           const hasTPNow = hasAnyReduceOnlyTP(open);
 
           // Если пользователь снял SL/TP руками — сбрасываем флаги, чтобы довыставить заново
@@ -1368,7 +1390,7 @@ export async function runCommand(
 
           const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
-          const shouldPlaceTP_SL = hasPosition && (!hasSLNow || !hasTPNow);
+          const shouldPlaceTP_SL = hasPosition && (!hasSLNow || !hasTPNow || increased);
 
           if (shouldPlaceTP_SL) {
             const filters = ex.getSymbolFilters(symbolCcxt);
@@ -1401,15 +1423,20 @@ export async function runCommand(
                 throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
               }
 
-              // SL ставим только если он реально отсутствует
-              if (!hasSLNow) {
+              const slDiffThreshold = Math.max(filters.tickSize || 0, 1e-9);
+              const slNeedsUpdate = !currentSLPrice || Math.abs(currentSLPrice - safeSL) > slDiffThreshold;
+              if (slNeedsUpdate) {
                 await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
                 try {
                   await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+                  slPxCurrent = safeSL;
                 } catch (e: any) {
-                  if (!isIgnorableAlgoClosePositionDup(e)) throw e;
+                  if (isIgnorableAlgoClosePositionDup(e)) {
+                    slPxCurrent = safeSL;
+                  } else {
+                    throw e;
+                  }
                 }
-                slPxCurrent = safeSL;
               }
 
               // TP ставим только если их реально нет
@@ -2120,7 +2147,8 @@ export async function runCommand(
         };
 
         // ✅ Надёжность: если SL сняты руками, сбрасываем флаги и довыставляем
-        const hasSLNow = hasClosePositionConditional(allOpenOrders);
+        const currentSLPrice = getCurrentSLPrice(allOpenOrders);
+        const hasSLNow = currentSLPrice > 0;
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
         
@@ -2138,7 +2166,7 @@ export async function runCommand(
 
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
-        const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow);
+        const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow || positionIncreased);
         
         if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
@@ -2174,17 +2202,13 @@ export async function runCommand(
               throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
             }
 
-            await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
             const sideExit2 = side === "long" ? "sell" : "buy";
             
-            // ✅ ИСПРАВЛЕНО: Выставляем SL всегда, если его ещё нет или он изменился
-            // ⚠️ КРИТИЧНО: slPxCurrent устанавливается ТОЛЬКО при успешном выставлении
-            if (!slPxCurrent || Math.abs(slPxCurrent - safeSL) > 1e-9) {
+            const slDiffThreshold = Math.max(filters.tickSize || 0, 1e-9);
+            const slNeedsUpdate = !currentSLPrice || Math.abs(currentSLPrice - safeSL) > slDiffThreshold;
+            if (slNeedsUpdate) {
+              await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
               try {
-                // ✅ Анти-спам: если уже есть closePosition STOP/TP (обычно SL уже стоит) — не дергаем API
-                if (hasClosePositionConditional(allOpenOrders)) {
-                  slPxCurrent = safeSL;
-                } else {
                 await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
                 slPxCurrent = safeSL;
                 // ✅ АНТИСПАМ: Отправляем сообщение только один раз
@@ -2194,7 +2218,6 @@ export async function runCommand(
                     : `<b>✅ SL выставлен:</b> ${safeSL}`
                   );
                   slMessageSent = true;
-                }
                 }
               } catch (e: any) {
                 // Binance: -4130 означает, что уже есть открытый closePosition STOP/TP в этом направлении.
