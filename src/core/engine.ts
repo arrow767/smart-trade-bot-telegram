@@ -1369,26 +1369,6 @@ export async function runCommand(
           return 0;
         };
 
-        const getCurrentSLPrice = (orders: any[]) => {
-          for (const o of orders || []) {
-            const t = String(o?.type || o?.strategyType || o?.orderType || "").toUpperCase();
-            const isStop = t.includes("STOP") && !t.includes("TAKE_PROFIT");
-            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
-            if (!isStop || !cp) continue;
-            const price = Number(
-              o?.stopPrice ??
-              o?.triggerPrice ??
-              o?.price ??
-              o?.info?.stopPrice ??
-              o?.info?.triggerPrice ??
-              o?.info?.price ??
-              0
-            );
-            if (price > 0) return price;
-          }
-          return 0;
-        };
-
         const isIgnorableAlgoClosePositionDup = (e: any) => {
           const msg = String(e?.message || e || "");
           const code = Number(e?.info?.code ?? e?.code ?? NaN);
@@ -2274,7 +2254,27 @@ export async function runCommand(
         };
 
         // ✅ Надёжность: если SL сняты руками, сбрасываем флаги и довыставляем
-        const currentSLPrice = getCurrentSLPrice(allOpenOrders);
+        const getCurrentSLPriceLocal = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || o?.orderType || "").toUpperCase();
+            const isStop = t.includes("STOP") && !t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (!isStop || !cp) continue;
+            const price = Number(
+              o?.stopPrice ??
+              o?.triggerPrice ??
+              o?.price ??
+              o?.info?.stopPrice ??
+              o?.info?.triggerPrice ??
+              o?.info?.price ??
+              0
+            );
+            if (price > 0) return price;
+          }
+          return 0;
+        };
+
+        const currentSLPrice = getCurrentSLPriceLocal(allOpenOrders);
         const hasSLNow = currentSLPrice > 0;
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
