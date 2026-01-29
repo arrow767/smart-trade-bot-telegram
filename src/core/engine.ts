@@ -1633,6 +1633,49 @@ export async function runCommand(
       }
     } catch {}
   }
+
+  const isMaxQtyError = (e: any) => {
+    const msg = String(e?.message || e || "");
+    const code = Number(e?.info?.code ?? e?.code ?? NaN);
+    return code === -4005 || /max quantity|Quantity greater than max quantity/i.test(msg);
+  };
+
+  const splitQtyInHalf = (qty: number) => {
+    const f = ex.getSymbolFilters(symbolCcxt);
+    const step = f.stepSize || 0;
+    const minQty = f.minQty || 0;
+    if (!(step > 0)) return null;
+    const halfSteps = Math.floor((qty / 2) / step + 1e-12);
+    const q1 = Number(ex.amountToPrecision(symbolCcxt, halfSteps * step));
+    const q2 = Number(ex.amountToPrecision(symbolCcxt, qty - q1));
+    if (!(q1 > 0) || !(q2 > 0) || q1 < minQty || q2 < minQty || q1 >= qty) return null;
+    return [q1, q2] as [number, number];
+  };
+
+  const placeEntryWithSplit = async (type: "LIMIT" | "STOP_MARKET", qty: number, price: number): Promise<string[]> => {
+    const qtyPrec = Number(ex.amountToPrecision(symbolCcxt, qty));
+    if (!(qtyPrec > 0)) throw new Error("Bad qty");
+    try {
+      if (type === "LIMIT") {
+        const o = await ex.createLimit(symbolCcxt, sideEntry as any, qtyPrec, price);
+        const usdEst = qtyPrec * price;
+        info(`➕ LIMIT вход: ~${qtyPrec.toFixed(5)} @ ${price} (≈ $${usdEst.toFixed(2)})`);
+        return [o.id!];
+      }
+      const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, qtyPrec, price);
+      const usdEst = qtyPrec * price;
+      info(`➕ STOP вход: ~${qtyPrec.toFixed(5)} @ ${price} (≈ $${usdEst.toFixed(2)})`);
+      return [o.id!];
+    } catch (e: any) {
+      if (!isMaxQtyError(e)) throw e;
+      const parts = splitQtyInHalf(qtyPrec);
+      if (!parts) throw e;
+      const left = await placeEntryWithSplit(type, parts[0], price);
+      const right = await placeEntryWithSplit(type, parts[1], price);
+      return [...left, ...right];
+    }
+  };
+
   const legsForPlacement: TradeLeg[] = splitLegsByUsd(legs as TradeLeg[]);
   for (const leg of legsForPlacement) {
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
@@ -1653,23 +1696,15 @@ export async function runCommand(
     const safePrice = Number(ex.priceToPrecision(symbolCcxt, orderMeta.safePrice));
 
     try {
-      if (orderMeta.type === "LIMIT") {
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, safePrice);
-        entryIds.push(o.id!);
-        info(`➕ LIMIT вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
-      } else {
-        const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, safePrice);
-        entryIds.push(o.id!);
-        info(`➕ STOP вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
-      }
+      const ids = await placeEntryWithSplit(orderMeta.type === "LIMIT" ? "LIMIT" : "STOP_MARKET", pick.qty, safePrice);
+      entryIds.push(...ids);
     } catch (err: any) {
       // При ошибке — пытаемся LIMIT как fallback (но только если цена безопасна!)
       const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, leg.price));
       const isSafe = (side === "long" ? fallbackPrice < markPrice : fallbackPrice > markPrice);
       if (isSafe) {
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, fallbackPrice);
-        entryIds.push(o.id!);
-        info(`➕ LIMIT вход (fallback): ~${(pick.qty).toFixed(5)} @ ${fallbackPrice}`);
+        const ids = await placeEntryWithSplit("LIMIT", pick.qty, fallbackPrice);
+        entryIds.push(...ids);
       } else {
         throw new Error(`Не удалось разместить отложку для $${leg.usd} @ ${leg.price}: ${err.message}`);
       }
