@@ -174,7 +174,7 @@ async function handleTaskChaining(
   // Получаем старые активные задачи на том же символе в том же направлении
   const olderTasks = book.getOlderActiveTasksForSymbolSide(symbolCcxt, side, newTaskId);
   
-  console.log(`[CHAIN] Task #${newTaskId} ${symbolCcxt} ${side}: found ${olderTasks.length} older tasks`);
+  log(`[CHAIN] Task #${newTaskId} ${symbolCcxt} ${side}: found ${olderTasks.length} older tasks`);
   
   if (olderTasks.length === 0) {
     return { chainHandled: false, supersededTaskIds: [] };
@@ -186,7 +186,7 @@ async function handleTaskChaining(
   
   for (const oldTask of olderTasks) {
     const oldEntryAvg = oldTask.taskEntryAvg || 0;
-    console.log(`[CHAIN] Checking old task #${oldTask.id}: oldEntryAvg=${oldEntryAvg}`);
+    log(`[CHAIN] Checking old task #${oldTask.id}: oldEntryAvg=${oldEntryAvg}`);
     
     // Цепочка! Отменяем старую задачу
     log(`🔗 Цепочка: task #${newTaskId} supersedes task #${oldTask.id} (${side}, ${oldEntryAvg} → ${newTaskEntryAvg})`);
@@ -200,7 +200,7 @@ async function handleTaskChaining(
     try {
       await cancelBracketOnly(ex, symbolCcxt, keepIds);
     } catch (e: any) {
-      console.warn(`[WARN] Failed to cancel bracket for old task #${oldTask.id}: ${e?.message}`);
+      log(`[WARN] Failed to cancel bracket for old task #${oldTask.id}: ${e?.message}`);
     }
     
     try {
@@ -271,7 +271,7 @@ async function handleTaskChaining(
     log(`🔗 Цепочка: TP будут выставлены после исполнения всех отложек`);
     
   } catch (e: any) {
-    console.error(`[ERROR] handleTaskChaining failed to place SL: ${e?.message}`);
+    log(`[ERROR] handleTaskChaining failed to place SL: ${e?.message}`);
   }
   
   return { chainHandled: true, supersededTaskIds };
@@ -486,8 +486,8 @@ export async function runCommand(
         } catch {}
       }
     } catch (e: any) {
-      console.error("Orders fetch error details:", e);
-      info(`Ошибка получения ордеров: ${e?.message || e}`);
+      const errMsg = String(e?.message || e || "");
+      info(mode === "console" ? `Ошибка получения ордеров: ${errMsg}` : `<b>Ошибка получения ордеров:</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`);
     }
     
     rows.sort((a,b)=>{
@@ -1369,6 +1369,26 @@ export async function runCommand(
           return 0;
         };
 
+        const getCurrentSLPrice = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || o?.orderType || "").toUpperCase();
+            const isStop = t.includes("STOP") && !t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (!isStop || !cp) continue;
+            const price = Number(
+              o?.stopPrice ??
+              o?.triggerPrice ??
+              o?.price ??
+              o?.info?.stopPrice ??
+              o?.info?.triggerPrice ??
+              o?.info?.price ??
+              0
+            );
+            if (price > 0) return price;
+          }
+          return 0;
+        };
+
         const isIgnorableAlgoClosePositionDup = (e: any) => {
           const msg = String(e?.message || e || "");
           const code = Number(e?.info?.code ?? e?.code ?? NaN);
@@ -1469,9 +1489,9 @@ export async function runCommand(
                 
                 // 🔍 ДИАГНОСТИКА MARKET TP
                 const slDistance = Math.abs(slEntryAvg - safeSL);
-                console.log(`[MARKET TP] entry=${slEntryAvg.toFixed(6)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`);
-                console.log(`[MARKET TP] take_profit multipliers: ${preset.take_profit.join(', ')}`);
-                console.log(`[MARKET TP] TP prices: ${re.tpPrices.map(p => p.toFixed(6)).join(', ')}`);
+                info(mode === "console" ? `[MARKET TP] entry=${slEntryAvg.toFixed(6)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}` : `<b>[MARKET TP]</b> entry=${slEntryAvg.toFixed(6)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`);
+                info(mode === "console" ? `[MARKET TP] take_profit multipliers: ${preset.take_profit.join(', ')}` : `<b>[MARKET TP]</b> take_profit multipliers: ${preset.take_profit.join(', ')}`);
+                info(mode === "console" ? `[MARKET TP] TP prices: ${re.tpPrices.map(p => p.toFixed(6)).join(', ')}` : `<b>[MARKET TP]</b> TP prices: ${re.tpPrices.map(p => p.toFixed(6)).join(', ')}`);
                 let tpQtys = splitQtyToStep(posSize, preset.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
                 tpQtys = tpQtys.map((q) => Number(ex.amountToPrecision(symbolCcxt, q)));
@@ -1564,7 +1584,7 @@ export async function runCommand(
             if (isTemporary) {
               tempErrorCountMarket++;
               if (tempErrorCountMarket % MAX_TEMP_ERRORS_MARKET === 1 && !isRateLimit) {
-                console.warn(`[WARN] Temporary error in MARKET task #${task.id}: ${errMsg.slice(0, 100)}`);
+                info(mode === "console" ? `[WARN] Temporary error in MARKET task #${task.id}: ${errMsg.slice(0, 100)}` : `<b>[WARN]</b> Temporary error in MARKET task #${task.id}: ${errMsg.slice(0, 100).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`);
               }
               // ✅ Rate limit: ждём дольше
               const delay = isRateLimit ? 10000 : 2000;
@@ -1927,7 +1947,11 @@ export async function runCommand(
           // Не спамим ошибками fetch/network - логируем только раз
           const msg = String(e?.message || e);
           if (!/fetch|timeout|network/i.test(msg)) {
-            console.warn(`[WARN] Failed to fetch Algo Orders for ${symbolCcxt}: ${msg}`);
+            info(
+              mode === "console"
+                ? `[WARN] Failed to fetch Algo Orders for ${symbolCcxt}: ${msg}`
+                : `<b>[WARN]</b> Failed to fetch Algo Orders for ${symbolCcxt}: ${msg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+            );
           }
         }
         
@@ -1957,12 +1981,20 @@ export async function runCommand(
         if (currentTaskForLegs && entriesLeft < lastEntriesLeft) {
           const filledNow = lastEntriesLeft - entriesLeft;
           const allFilled = book.incrementFilledLegs(currentTaskForLegs, filledNow);
-          console.log(`[LEGS] Task #${task.id}: ${filledNow} leg(s) filled, entriesLeft=${entriesLeft}, allFilled=${allFilled}`);
+          info(
+            mode === "console"
+              ? `[LEGS] Task #${task.id}: ${filledNow} leg(s) filled, entriesLeft=${entriesLeft}, allFilled=${allFilled}`
+              : `<b>[LEGS]</b> Task #${task.id}: ${filledNow} leg(s) filled, entriesLeft=${entriesLeft}, allFilled=${allFilled}`
+          );
           
           // Если все отложки заполнены — помечаем
           if (allFilled || entriesLeft === 0) {
             book.setAllLegsFilled(currentTaskForLegs, true);
-            console.log(`[LEGS] Task #${task.id}: ALL LEGS FILLED — готовы к выставлению TP`);
+            info(
+              mode === "console"
+                ? `[LEGS] Task #${task.id}: ALL LEGS FILLED — готовы к выставлению TP`
+                : `<b>[LEGS]</b> Task #${task.id}: ALL LEGS FILLED — готовы к выставлению TP`
+            );
           }
         }
         lastEntriesLeft = entriesLeft;
@@ -2173,7 +2205,11 @@ export async function runCommand(
             book.updateTaskEntry(tt, fillPrice, newQty);
           }
           
-          console.log(`[FILL] Task #${task.id}: delta=${fmtQty5(newQty)}, fillPrice=${fillPrice.toFixed(4)}, entryAvg(exchange)=${entryAvg.toFixed(4)}`);
+          info(
+            mode === "console"
+              ? `[FILL] Task #${task.id}: delta=${fmtQty5(newQty)}, fillPrice=${fillPrice.toFixed(4)}, entryAvg(exchange)=${entryAvg.toFixed(4)}`
+              : `<b>[FILL]</b> Task #${task.id}: delta=${fmtQty5(newQty)}, fillPrice=${fillPrice.toFixed(4)}, entryAvg(exchange)=${entryAvg.toFixed(4)}`
+          );
           
           // ✅ НОВОЕ: Сразу вызываем handleTaskChaining при КАЖДОМ fill
           // Это нужно чтобы SL пересчитывался сразу, не дожидаясь entriesLeft === 0
@@ -2213,7 +2249,12 @@ export async function runCommand(
                 }
               }
             } catch (e: any) {
-              console.error(`[ERROR] handleTaskChaining on fill: ${e?.message}`);
+              const errMsg = String(e?.message || e || "");
+              info(
+                mode === "console"
+                  ? `[ERROR] handleTaskChaining on fill: ${errMsg}`
+                  : `<b>[ERROR]</b> handleTaskChaining on fill: ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+              );
             }
           }
         }
@@ -2310,11 +2351,13 @@ export async function runCommand(
                 // Это не критично (позиция уже "защищена"), поэтому не шлем это в Telegram.
                 if (isIgnorableAlgoClosePositionDup(e)) {
                   slPxCurrent = safeSL;
-                  if (mode === "console") {
-                    console.warn(`SL already exists (ignored -4130): ${e?.message || e}`);
-                  }
+                  const errMsg = String(e?.message || e || "");
+                  info(
+                    mode === "console"
+                      ? `SL already exists (ignored -4130): ${errMsg}`
+                      : `<b>SL already exists (ignored -4130):</b> ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                  );
                 } else {
-                  console.error(`Failed to place SL: ${e?.message || e}`);
                   const errMsg = String(e?.message || e || "Unknown error");
                   info(mode === "console" 
                     ? `⚠️ Ошибка выставления SL: ${errMsg}`
@@ -2341,9 +2384,11 @@ export async function runCommand(
                 // ✅ КРИТИЧНО: Проверяем что позиция реально существует на бирже
                 const actualPosSize = Math.abs(await ex.fetchPositionSize(symbolCcxt).catch(() => 0));
                 if (actualPosSize < minQtyForCheck) {
-                  if (mode === "console") {
-                    console.warn(`[WARN] Cannot place TP: position is flat (actualPosSize=${actualPosSize})`);
-                  }
+                  info(
+                    mode === "console"
+                      ? `[WARN] Cannot place TP: position is flat (actualPosSize=${actualPosSize})`
+                      : `<b>[WARN]</b> Cannot place TP: position is flat (actualPosSize=${actualPosSize})`
+                  );
                   // Позиция закрыта - не выставляем TP
                   tpsPlaced = true; // Помечаем чтобы не пытаться снова
                 } else {
@@ -2358,9 +2403,21 @@ export async function runCommand(
 
                 // 🔍 ДИАГНОСТИКА TP
                 const slDistance = Math.abs(tpEntryAvg - safeSL);
-                console.log(`[TP CALC] entry=${tpEntryAvg.toFixed(8)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`);
-                console.log(`[TP CALC] TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`);
-                console.log(`[TP CALC] take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`);
+                info(
+                  mode === "console"
+                    ? `[TP CALC] entry=${tpEntryAvg.toFixed(8)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`
+                    : `<b>[TP CALC]</b> entry=${tpEntryAvg.toFixed(8)}, safeSL=${safeSL}, slDistance=${slDistance.toFixed(6)}`
+                );
+                info(
+                  mode === "console"
+                    ? `[TP CALC] TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`
+                    : `<b>[TP CALC]</b> TP prices: ${re.tpPrices.map(p => p.toFixed(8)).join(', ')}`
+                );
+                info(
+                  mode === "console"
+                    ? `[TP CALC] take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`
+                    : `<b>[TP CALC]</b> take_profit multipliers: ${presetForRisk.take_profit.join(', ')}`
+                );
 
                 let tpQtys = splitQtyToStep(actualPosSizeForTP, presetForRisk.take_profit_ratio, filters.stepSize);
                 tpQtys = mergeDustToPrev(tpQtys, filters.minQty, filters.stepSize);
@@ -2372,9 +2429,11 @@ export async function runCommand(
                   // Корректируем пропорционально
                   const ratio = actualPosSizeForTP / totalTpQty;
                   tpQtys = tpQtys.map(q => Number(ex.amountToPrecision(symbolCcxt, q * ratio)));
-                  if (mode === "console") {
-                    console.warn(`[WARN] TP qty adjusted: ${totalTpQty} → ${tpQtys.reduce((s, q) => s + q, 0)} (pos=${actualPosSizeForTP})`);
-                  }
+                  info(
+                    mode === "console"
+                      ? `[WARN] TP qty adjusted: ${totalTpQty} → ${tpQtys.reduce((s, q) => s + q, 0)} (pos=${actualPosSizeForTP})`
+                      : `<b>[WARN]</b> TP qty adjusted: ${totalTpQty} → ${tpQtys.reduce((s, q) => s + q, 0)} (pos=${actualPosSizeForTP})`
+                  );
                 }
                 
                 // ✅ НОВОЕ: Пропускаем уже заполненные (съеденные) TP
@@ -2398,14 +2457,20 @@ export async function runCommand(
                     
                     // ✅ Обработка ошибки -2022: ReduceOnly Order is rejected (позиция закрыта или нет позиции)
                     if (tpErrCode === -2022 || /ReduceOnly.*rejected/i.test(tpErrMsg)) {
-                      if (mode === "console") {
-                        console.warn(`[WARN] TP rejected (-2022): position may be closed or insufficient size`);
-                      }
+                      info(
+                        mode === "console"
+                          ? `[WARN] TP rejected (-2022): position may be closed or insufficient size`
+                          : `<b>[WARN]</b> TP rejected (-2022): position may be closed or insufficient size`
+                      );
                       // Позиция закрыта - не пытаемся дальше
                       break;
                     }
                     // Другие ошибки - логируем но продолжаем
-                    console.warn(`[WARN] Failed to place TP #${i + 1}: ${tpErrMsg}`);
+                    info(
+                      mode === "console"
+                        ? `[WARN] Failed to place TP #${i + 1}: ${tpErrMsg}`
+                        : `<b>[WARN]</b> Failed to place TP #${i + 1}: ${tpErrMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                    );
                   }
                 }
                 tpsPlaced = true;
@@ -2420,15 +2485,16 @@ export async function runCommand(
                   }
                 }
               } catch (e: any) {
-                console.error(`Failed to place TP: ${e?.message || e}`);
                 const errMsg = String(e?.message || e || "Unknown error");
                 const errCode = Number(e?.code ?? e?.info?.code ?? NaN);
                 
                 // ✅ Обработка ошибки -2022
                 if (errCode === -2022 || /ReduceOnly.*rejected/i.test(errMsg)) {
-                  if (mode === "console") {
-                    console.warn(`[WARN] TP placement failed (-2022): position may be closed`);
-                  }
+                  info(
+                    mode === "console"
+                      ? `[WARN] TP placement failed (-2022): position may be closed`
+                      : `<b>[WARN]</b> TP placement failed (-2022): position may be closed`
+                  );
                   tpsPlaced = true; // Помечаем чтобы не пытаться снова
                   // Не продолжаем выполнение - позиция закрыта
                 } else {
@@ -2512,7 +2578,12 @@ export async function runCommand(
                     // Сообщение о цепочке уже отправлено в блоке increased
                   }
                 } catch (e: any) {
-                  console.error(`[ERROR] handleTaskChaining failed: ${e?.message}`);
+                  const errMsg = String(e?.message || e || "");
+                  info(
+                    mode === "console"
+                      ? `[ERROR] handleTaskChaining failed: ${errMsg}`
+                      : `<b>[ERROR]</b> handleTaskChaining failed: ${errMsg.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+                  );
                 }
               }
             }
@@ -2654,7 +2725,11 @@ export async function runCommand(
             tempErrorCount++;
             // Логируем только каждую N-ую ошибку (но не для rate limit)
             if (tempErrorCount % MAX_TEMP_ERRORS_BEFORE_LOG === 1 && !isRateLimit) {
-              console.warn(`[WARN] Temporary error in task #${task.id} tracking loop (count=${tempErrorCount}): ${errMsg.slice(0, 100)}`);
+              info(
+                mode === "console"
+                  ? `[WARN] Temporary error in task #${task.id} tracking loop (count=${tempErrorCount}): ${errMsg.slice(0, 100)}`
+                  : `<b>[WARN]</b> Temporary error in task #${task.id} tracking loop (count=${tempErrorCount}): ${errMsg.slice(0, 100).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}`
+              );
             }
             // ✅ Rate limit: ждём дольше (10 сек)
             const delay = isRateLimit ? 10000 : 3000;
