@@ -1,4 +1,4 @@
-﻿import {
+import {
   getPreset,
   listPresets,
   upsertPreset,
@@ -202,6 +202,27 @@ async function handleTaskChaining(
     } catch (e: any) {
       console.warn(`[WARN] Failed to cancel bracket for old task #${oldTask.id}: ${e?.message}`);
     }
+    
+    try {
+      const oldEntrySet = new Set((oldTask.entryOrderIds || []).map(String));
+      const openOrders = (await ex.fetchOpenOrders(symbolCcxt)) as any[];
+      for (const o of openOrders) {
+        const oid = String(o.id || o.info?.orderId || "");
+        const clientId = String(o.clientOrderId || o.info?.clientOrderId || "");
+        if (oldEntrySet.has(oid) || (clientId && oldEntrySet.has(clientId))) {
+          try { await ex.cancelOrder(symbolCcxt, oid); } catch {}
+        }
+      }
+      try {
+        const algoOrders = await ex.fetchOpenAlgoOrders(symbolCcxt);
+        for (const ao of algoOrders) {
+          const algoId = String(ao.algoId || ao.orderId || ao.clientAlgoId || "");
+          if (algoId && oldEntrySet.has(algoId)) {
+            try { await ex.cancelAlgoOrder(symbolCcxt, algoId); } catch {}
+          }
+        }
+      } catch {}
+    } catch {}
     
     // Помечаем как superseded
     book.supersede(oldTask.id, newTaskId);
@@ -1316,6 +1337,7 @@ export async function runCommand(
           return false;
         };
 
+
         const hasAnyReduceOnlyTP = (orders: any[]) => {
           for (const o of orders || []) {
             const t = String(o?.type || "").toUpperCase();
@@ -1325,6 +1347,26 @@ export async function runCommand(
             if (isLimit && ro && !cp) return true;
           }
           return false;
+        };
+
+        const getCurrentSLPrice = (orders: any[]) => {
+          for (const o of orders || []) {
+            const t = String(o?.type || o?.strategyType || o?.orderType || "").toUpperCase();
+            const isStop = t.includes("STOP") && !t.includes("TAKE_PROFIT");
+            const cp = o?.closePosition === true || o?.closePosition === "true" || o?.info?.closePosition === true || o?.info?.closePosition === "true";
+            if (!isStop || !cp) continue;
+            const price = Number(
+              o?.stopPrice ??
+              o?.triggerPrice ??
+              o?.price ??
+              o?.info?.stopPrice ??
+              o?.info?.triggerPrice ??
+              o?.info?.price ??
+              0
+            );
+            if (price > 0) return price;
+          }
+          return 0;
         };
 
         const isIgnorableAlgoClosePositionDup = (e: any) => {
@@ -1355,7 +1397,8 @@ export async function runCommand(
           let algo: any[] = [];
           try { algo = await ex.fetchOpenAlgoOrders(symbolCcxt); } catch {}
           const allOpen = [...open, ...algo];
-          const hasSLNow = hasClosePositionConditional(allOpen);
+          const currentSLPrice = getCurrentSLPrice(allOpen);
+          const hasSLNow = currentSLPrice > 0;
           const hasTPNow = hasAnyReduceOnlyTP(open);
 
           // Если пользователь снял SL/TP руками — сбрасываем флаги, чтобы довыставить заново
@@ -1368,7 +1411,7 @@ export async function runCommand(
 
           const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
           const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
-          const shouldPlaceTP_SL = hasPosition && (!hasSLNow || !hasTPNow);
+          const shouldPlaceTP_SL = hasPosition && (!hasSLNow || !hasTPNow || increased);
 
           if (shouldPlaceTP_SL) {
             const filters = ex.getSymbolFilters(symbolCcxt);
@@ -1401,15 +1444,20 @@ export async function runCommand(
                 throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
               }
 
-              // SL ставим только если он реально отсутствует
-              if (!hasSLNow) {
+              const slDiffThreshold = Math.max(filters.tickSize || 0, 1e-9);
+              const slNeedsUpdate = !currentSLPrice || Math.abs(currentSLPrice - safeSL) > slDiffThreshold;
+              if (slNeedsUpdate) {
                 await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
                 try {
                   await ex.createStopMarketClose(symbolCcxt, sideExit as any, safeSL);
+                  slPxCurrent = safeSL;
                 } catch (e: any) {
-                  if (!isIgnorableAlgoClosePositionDup(e)) throw e;
+                  if (isIgnorableAlgoClosePositionDup(e)) {
+                    slPxCurrent = safeSL;
+                  } else {
+                    throw e;
+                  }
                 }
-                slPxCurrent = safeSL;
               }
 
               // TP ставим только если их реально нет
@@ -1633,6 +1681,77 @@ export async function runCommand(
       }
     } catch {}
   }
+
+  const isMaxQtyError = (e: any) => {
+    const msg = String(e?.message || e || "");
+    const code = Number(e?.info?.code ?? e?.code ?? NaN);
+    return code === -4005 || /max quantity|Quantity greater than max quantity/i.test(msg);
+  };
+
+  const splitQtyInHalf = (qty: number) => {
+    const f = ex.getSymbolFilters(symbolCcxt);
+    const step = f.stepSize || 0;
+    const minQty = f.minQty || 0;
+    if (!(step > 0)) return null;
+    const halfSteps = Math.floor((qty / 2) / step + 1e-12);
+    const q1 = Number(ex.amountToPrecision(symbolCcxt, halfSteps * step));
+    const q2 = Number(ex.amountToPrecision(symbolCcxt, qty - q1));
+    if (!(q1 > 0) || !(q2 > 0) || q1 < minQty || q2 < minQty || q1 >= qty) return null;
+    return [q1, q2] as [number, number];
+  };
+
+  const chunkQtyByMax = (qty: number, price: number): number[] => {
+    const f = ex.getSymbolFilters(symbolCcxt);
+    const step = f.stepSize || 0;
+    const minQty = f.minQty || 0;
+    let maxQ = f.maxQty || Infinity;
+    if (Number.isFinite(tierCapUsdForAlign as number) && (tierCapUsdForAlign as number) > 0 && price > 0) {
+      const capQ = (tierCapUsdForAlign as number) / price;
+      maxQ = Math.min(maxQ, capQ);
+    }
+    if (!Number.isFinite(maxQ) || !(maxQ > 0) || !(step > 0)) return [qty];
+    const maxQSteps = Math.max(1, Math.floor(maxQ / step + 1e-12));
+    const maxQEff = Number(ex.amountToPrecision(symbolCcxt, maxQSteps * step));
+    if (!(maxQEff > 0) || maxQEff < minQty) return [qty];
+    const out: number[] = [];
+    let remain = Number(ex.amountToPrecision(symbolCcxt, qty));
+    while (remain > maxQEff + 1e-12) {
+      out.push(maxQEff);
+      remain = Number(ex.amountToPrecision(symbolCcxt, remain - maxQEff));
+    }
+    if (remain > minQty - 1e-12) out.push(remain);
+    return out.length ? out : [qty];
+  };
+
+  const placeEntryWithSplit = async (type: "LIMIT" | "STOP_MARKET", qty: number, price: number): Promise<string[]> => {
+    const qtyPrec = Number(ex.amountToPrecision(symbolCcxt, qty));
+    if (!(qtyPrec > 0)) throw new Error("Bad qty");
+    const chunks = chunkQtyByMax(qtyPrec, price);
+    const ids: string[] = [];
+    for (const q of chunks) {
+      try {
+        if (type === "LIMIT") {
+          const o = await ex.createLimit(symbolCcxt, sideEntry as any, q, price);
+          const usdEst = q * price;
+          info(`➕ LIMIT вход: ~${q.toFixed(5)} @ ${price} (≈ $${usdEst.toFixed(2)})`);
+          ids.push(o.id!);
+        } else {
+          const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, q, price);
+          const usdEst = q * price;
+          info(`➕ STOP вход: ~${q.toFixed(5)} @ ${price} (≈ $${usdEst.toFixed(2)})`);
+          ids.push(o.id!);
+        }
+      } catch (e: any) {
+        if (!isMaxQtyError(e)) throw e;
+        const parts = splitQtyInHalf(q);
+        if (!parts) throw e;
+        const left = await placeEntryWithSplit(type, parts[0], price);
+        const right = await placeEntryWithSplit(type, parts[1], price);
+        ids.push(...left, ...right);
+      }
+    }
+    return ids;
+  };
   const legsForPlacement: TradeLeg[] = splitLegsByUsd(legs as TradeLeg[]);
   for (const leg of legsForPlacement) {
     const pick = computeQtyForUsdSmart(ex, symbolCcxt, leg.usd, leg.price);
@@ -1653,23 +1772,15 @@ export async function runCommand(
     const safePrice = Number(ex.priceToPrecision(symbolCcxt, orderMeta.safePrice));
 
     try {
-      if (orderMeta.type === "LIMIT") {
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, safePrice);
-        entryIds.push(o.id!);
-        info(`➕ LIMIT вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
-      } else {
-        const o = await ex.createStopMarketEntry(symbolCcxt, sideEntry as any, pick.qty, safePrice);
-        entryIds.push(o.id!);
-        info(`➕ STOP вход: ~${(pick.qty).toFixed(5)} @ ${safePrice} (≈ $${pick.usdActual.toFixed(2)})`);
-      }
+      const ids = await placeEntryWithSplit(orderMeta.type === "LIMIT" ? "LIMIT" : "STOP_MARKET", pick.qty, safePrice);
+      entryIds.push(...ids);
     } catch (err: any) {
       // При ошибке — пытаемся LIMIT как fallback (но только если цена безопасна!)
       const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, leg.price));
       const isSafe = (side === "long" ? fallbackPrice < markPrice : fallbackPrice > markPrice);
       if (isSafe) {
-        const o = await ex.createLimit(symbolCcxt, sideEntry as any, pick.qty, fallbackPrice);
-        entryIds.push(o.id!);
-        info(`➕ LIMIT вход (fallback): ~${(pick.qty).toFixed(5)} @ ${fallbackPrice}`);
+        const ids = await placeEntryWithSplit("LIMIT", pick.qty, fallbackPrice);
+        entryIds.push(...ids);
       } else {
         throw new Error(`Не удалось разместить отложку для $${leg.usd} @ ${leg.price}: ${err.message}`);
       }
@@ -2089,8 +2200,10 @@ export async function runCommand(
               
               if (chainResult.chainHandled) {
                 chainHandled = true;
-                // SL/TP уже выставлены в handleTaskChaining — пропускаем обычную логику
-                slPxCurrent = 1; // Помечаем что SL есть
+                slPxCurrent = undefined;
+                tpsPlaced = false;
+                tpMessageSent = false;
+                planSent = false;
                 
                 if (chainResult.supersededTaskIds.length > 0) {
                   info(mode === "console" 
@@ -2120,7 +2233,8 @@ export async function runCommand(
         };
 
         // ✅ Надёжность: если SL сняты руками, сбрасываем флаги и довыставляем
-        const hasSLNow = hasClosePositionConditional(allOpenOrders);
+        const currentSLPrice = getCurrentSLPrice(allOpenOrders);
+        const hasSLNow = currentSLPrice > 0;
         const hasTPNow = hasAnyReduceOnlyTP(open);
         if (!hasSLNow) slPxCurrent = undefined;
         
@@ -2138,7 +2252,7 @@ export async function runCommand(
 
         const minQtyForCheck = ex.getSymbolFilters(symbolCcxt).minQty || 0;
         const hasPosition = posSize > minQtyForCheck * 0.5 && entryAvg > 0;
-        const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow);
+        const shouldPlaceTP_SL = hasPosition && (!hasTPNow || !hasSLNow || positionIncreased);
         
         if (shouldPlaceTP_SL) {
           const filters = ex.getSymbolFilters(symbolCcxt);
@@ -2174,17 +2288,13 @@ export async function runCommand(
               throw new Error(`Bad stopPrice computed: entryAvg=${entryAvg}, posSize=${posSize}, desired=${precSL}, mark=${mark}`);
             }
 
-            await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
             const sideExit2 = side === "long" ? "sell" : "buy";
             
-            // ✅ ИСПРАВЛЕНО: Выставляем SL всегда, если его ещё нет или он изменился
-            // ⚠️ КРИТИЧНО: slPxCurrent устанавливается ТОЛЬКО при успешном выставлении
-            if (!slPxCurrent || Math.abs(slPxCurrent - safeSL) > 1e-9) {
+            const slDiffThreshold = Math.max(filters.tickSize || 0, 1e-9);
+            const slNeedsUpdate = !currentSLPrice || Math.abs(currentSLPrice - safeSL) > slDiffThreshold;
+            if (slNeedsUpdate) {
+              await cancelOnlySL(ex, symbolCcxt, keep).catch(() => {});
               try {
-                // ✅ Анти-спам: если уже есть closePosition STOP/TP (обычно SL уже стоит) — не дергаем API
-                if (hasClosePositionConditional(allOpenOrders)) {
-                  slPxCurrent = safeSL;
-                } else {
                 await ex.createStopMarketClose(symbolCcxt, sideExit2 as any, safeSL);
                 slPxCurrent = safeSL;
                 // ✅ АНТИСПАМ: Отправляем сообщение только один раз
@@ -2194,7 +2304,6 @@ export async function runCommand(
                     : `<b>✅ SL выставлен:</b> ${safeSL}`
                   );
                   slMessageSent = true;
-                }
                 }
               } catch (e: any) {
                 // Binance: -4130 означает, что уже есть открытый closePosition STOP/TP в этом направлении.
@@ -2395,11 +2504,10 @@ export async function runCommand(
                   
                   if (chainResult.chainHandled) {
                     chainHandled = true;
-                    // SL/TP уже выставлены в handleTaskChaining
-                    tpsPlaced = true;
-                    tpMessageSent = true;
-                    slPxCurrent = 1; // Помечаем что SL есть (точное значение не важно)
-                    planSent = true;
+                    tpsPlaced = false;
+                    tpMessageSent = false;
+                    slPxCurrent = undefined;
+                    planSent = false;
                     
                     // Сообщение о цепочке уже отправлено в блоке increased
                   }
