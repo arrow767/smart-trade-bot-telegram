@@ -1055,6 +1055,7 @@ bot.on("text", async (ctx)=>{
           ? parsed.presetName
           : ((parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : parsed.presetName);
         const preset = await getPreset(presetNameEffective);
+        const presetNameResolved = preset.config_name || presetNameEffective;
         
         // ✅ НОВОЕ: Рассчитываем риск из % депозита если указан riskPercentOverride
         let riskUsd: number;
@@ -1230,7 +1231,7 @@ bot.on("text", async (ctx)=>{
           legs,
           takes: preset.take_profit,
           takesRatio: preset.take_profit_ratio,
-          preset: presetNameEffective,
+          preset: presetNameResolved,
           market: !!parsed.market,
           noPreset: parsed.noPreset || false, // ✅ НОВОЕ: передаём флаг noPreset
           existingTasks: existingTasks.length > 0 ? existingTasks : undefined,

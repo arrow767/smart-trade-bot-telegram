@@ -1237,6 +1237,7 @@ export async function runCommand(
     ? presetName
     : ((parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : presetName);
   const preset = await getPreset(presetNameEffective);
+  const presetNameResolved = preset.config_name || presetNameEffective;
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   
   // ✅ НОВОЕ: Если нет override и пресет использует % от депозита — рассчитываем
@@ -1304,7 +1305,7 @@ export async function runCommand(
     const task = book.add(symbolCcxt, `${side.toUpperCase()} MARKET ($${market.usd})`, { 
       side, 
       totalUsd: market.usd, 
-      presetName: presetNameEffective, 
+      presetName: presetNameResolved, 
       riskUsd: calculatedRiskUsd, 
       noPreset,
       entryLegsCount: 1  // ✅ MARKET = 1 leg (сразу заполнится)
@@ -1799,7 +1800,7 @@ export async function runCommand(
     { 
       side, 
       totalUsd, 
-      presetName: presetNameEffective, 
+      presetName: presetNameResolved, 
       riskUsd: calculatedRiskUsd, 
       noPreset, 
       entryPrices,

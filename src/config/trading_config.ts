@@ -125,7 +125,11 @@ export async function setDefaultPresetBySide(side: "long" | "short", name: strin
 export async function getPreset(name?: string): Promise<TradingPreset> {
   const cfg = await loadConfig();
   const key = (name || cfg.default || cfg.default_long || cfg.default_short || DEFAULT_PRESET_NAME).trim();
-  return cfg.presets[key] || DEFAULT_PRESET;
+  const direct = cfg.presets[key];
+  if (direct) return direct;
+  const lower = key.toLowerCase();
+  const matchedKey = Object.keys(cfg.presets).find((k) => k.toLowerCase() === lower);
+  return (matchedKey && cfg.presets[matchedKey]) || DEFAULT_PRESET;
 }
 
 export async function upsertPreset(preset: TradingPreset): Promise<void> {
