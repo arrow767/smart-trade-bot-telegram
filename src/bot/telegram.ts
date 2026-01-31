@@ -1051,7 +1051,9 @@ bot.on("text", async (ctx)=>{
     if (parsed.kind === "trade" && ENABLE_TRADE_NOTIFICATIONS) {
       try {
         const side = parsed.dir === "l" ? "long" : "short";
-        const presetNameEffective = (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : parsed.presetName;
+        const presetNameEffective = parsed.presetName && parsed.presetName !== DEFAULT_PRESET
+          ? parsed.presetName
+          : ((parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : parsed.presetName);
         const preset = await getPreset(presetNameEffective);
         
         // ✅ НОВОЕ: Рассчитываем риск из % депозита если указан riskPercentOverride

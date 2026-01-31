@@ -1233,8 +1233,9 @@ export async function runCommand(
   const sideExit = side === "long" ? "sell" : "buy";
 
   // ✅ НОВОЕ: авто-дефолт пресета отдельно для long/short
-  const presetNameEffective =
-    (parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : presetName;
+  const presetNameEffective = presetName && presetName !== DEFAULT_PRESET
+    ? presetName
+    : ((parsed as any)?.presetAuto ? await getDefaultPresetNameBySide(side) : presetName);
   const preset = await getPreset(presetNameEffective);
   const { symbolCcxt } = normalizeTickerToUsdt(rawTicker);
   
