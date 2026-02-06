@@ -200,7 +200,15 @@ export function parseLine(line: string): ParsedCmd | null {
   if (cmd === "cancel-all") return { kind: "cancel_all" };
   if (cmd === "close" && p[idx+1]) {
     const symbol = p[idx+1];
-    const percent = p[idx+2] ? Math.max(0, Math.min(100, Number(p[idx+2]))) : 100;
+    const raw = p[idx+2] || "100";
+    const pctMatch = raw.match(/^(\d+(?:[.,]\d+)?)\s*%$/);
+    let percent = NaN;
+    if (pctMatch) {
+      percent = Number(String(pctMatch[1]).replace(",", "."));
+    } else {
+      percent = Number(String(raw).replace(",", "."));
+    }
+    percent = Math.max(0, Math.min(100, percent));
     return { kind: "close", symbol, percent: Number.isFinite(percent) ? percent : 100 };
   }
   if (["help", "?"].includes(cmd)) return { kind: "help" };
