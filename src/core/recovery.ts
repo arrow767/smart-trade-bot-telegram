@@ -185,6 +185,11 @@ async function ensureBracketsForTask(
   const symbol = task.symbolCcxt;
   const filters = ex.getSymbolFilters(symbol);
   const minQty = filters.minQty || 0;
+  const roundPriceToTick = (price: number, tick: number) => {
+    if (!(tick > 0)) return price;
+    const steps = Math.floor(price / tick + 1e-12);
+    return steps * tick;
+  };
   
   // ✅ КРИТИЧНО: Перепроверяем позицию актуально (pos может быть устаревшим)
   let actualPosSize = Math.abs(pos.contracts || 0);
@@ -343,7 +348,7 @@ async function ensureBracketsForTask(
   
   // ✅ ИСПРАВЛЕНО: Используем planTPFromSL для расчёта TP от реального SL
   const rawTPPrices = planTPFromSL(side, tpEntryAvg, desiredSLForTP, preset.take_profit);
-  correctTPPrices = rawTPPrices.map(p => Number(ex.priceToPrecision(symbol, p)));
+  correctTPPrices = rawTPPrices.map(p => Number(ex.priceToPrecision(symbol, roundPriceToTick(p, filters.tickSize))));
   
   console.log(`  calculated TP prices: ${correctTPPrices.join(', ')}`);
   console.log(`  calculated SL: ${desiredSLForTP.toFixed(4)}`);

@@ -285,6 +285,12 @@ export async function runCommand(
   info: (msg: string) => void,
   mode: UIMode = "console"
 ) {
+  const roundPriceToTick = (price: number, tick: number) => {
+    if (!(tick > 0)) return price;
+    const steps = Math.floor(price / tick + 1e-12);
+    return steps * tick;
+  };
+
   if (parsed.kind === "help") {
     info(mode === "console" ? buildHelp(mode) : `<pre>${buildHelp(mode)}</pre>`);
     return;
@@ -1486,7 +1492,7 @@ export async function runCommand(
                 for (let i = filledTpCount; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0) continue;
-                  const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                  const p = Number(ex.priceToPrecision(symbolCcxt, roundPriceToTick(re.tpPrices[i], filters.tickSize)));
                   const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
                   if (ord?.id) {
                     tpIndexById.set(String(ord.id), i + 1);
@@ -1771,14 +1777,14 @@ export async function runCommand(
     // ✅ КРИТИЧНО: Безопасное определение типа ордера (НИКОГДА не market!)
     const filters = ex.getSymbolFilters(symbolCcxt);
     const orderMeta = safeEntryOrderType(side, leg.price, markPrice, filters.tickSize);
-    const safePrice = Number(ex.priceToPrecision(symbolCcxt, orderMeta.safePrice));
+    const safePrice = Number(ex.priceToPrecision(symbolCcxt, roundPriceToTick(orderMeta.safePrice, filters.tickSize)));
 
     try {
       const ids = await placeEntryWithSplit(orderMeta.type === "LIMIT" ? "LIMIT" : "STOP_MARKET", pick.qty, safePrice);
       entryIds.push(...ids);
     } catch (err: any) {
       // При ошибке — пытаемся LIMIT как fallback (но только если цена безопасна!)
-      const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, leg.price));
+      const fallbackPrice = Number(ex.priceToPrecision(symbolCcxt, roundPriceToTick(leg.price, filters.tickSize)));
       const isSafe = (side === "long" ? fallbackPrice < markPrice : fallbackPrice > markPrice);
       if (isSafe) {
         const ids = await placeEntryWithSplit("LIMIT", pick.qty, fallbackPrice);
@@ -2446,7 +2452,7 @@ export async function runCommand(
                 for (let i = filledTpCount; i < re.tpPrices.length; i++) {
                   const q = tpQtys[i];
                   if (q <= 0 || q < filters.minQty) continue;
-                  const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+                  const p = Number(ex.priceToPrecision(symbolCcxt, roundPriceToTick(re.tpPrices[i], filters.tickSize)));
                   try {
                     const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit2 as any, q, p);
                     if (ord?.id) {
@@ -2659,7 +2665,7 @@ export async function runCommand(
             for (let i = filledTpCountFallback; i < re.tpPrices.length; i++) {
               const q = tpQtys[i];
               if (q <= 0) continue;
-              const p = Number(ex.priceToPrecision(symbolCcxt, re.tpPrices[i]));
+              const p = Number(ex.priceToPrecision(symbolCcxt, roundPriceToTick(re.tpPrices[i], filters.tickSize)));
               const ord = await ex.createReduceOnlyLimit(symbolCcxt, sideExit as any, q, p);
               if (ord?.id) tpIndexById.set(String(ord.id), i + 1); // ✅ Сохраняем номер TP
             }
